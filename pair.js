@@ -15,13 +15,15 @@ const FileType = require('file-type');
 const AdmZip = require('adm-zip');
 const mongoose = require('mongoose');
 
+// ADD THIS LINE - Import plugins from external folder
+const plugins = require('./plugins');  // Or '../plugins' depending on your folder structure
+
 if (fs.existsSync('2nd_dev_config.env')) require('dotenv').config({ path: './2nd_dev_config.env' });
 
 const { sms } = require("./msg");
 
 // FIXED BAILEYS IMPORT - Use this exact code
 const baileysImport = require('@whiskeysockets/baileys');
-const {
     default: makeWASocket,
     useMultiFileAuthState,
     delay,
