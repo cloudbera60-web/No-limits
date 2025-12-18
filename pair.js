@@ -14,7 +14,35 @@ const yts = require('yt-search');
 const FileType = require('file-type');
 const AdmZip = require('adm-zip');
 const mongoose = require('mongoose');
-const plugins = require('./plugins');
+
+// Dynamic plugin loader - loads all .js files from plugins folder
+let plugins = {};
+try {
+    const pluginsPath = path.join(__dirname, 'plugins');
+    if (fs.existsSync(pluginsPath)) {
+        const pluginFiles = fs.readdirSync(pluginsPath).filter(file => file.endsWith('.js'));
+        
+        for (const file of pluginFiles) {
+            const pluginName = path.basename(file, '.js');
+            try {
+                const plugin = require(path.join(pluginsPath, file));
+                plugins[pluginName] = plugin;
+                console.log(`✅ Loaded plugin: ${pluginName}`);
+            } catch (error) {
+                console.error(`❌ Failed to load plugin ${file}:`, error.message);
+            }
+        }
+        console.log(`📦 Total plugins loaded: ${Object.keys(plugins).length}`);
+    } else {
+        console.log('📁 Creating plugins directory...');
+        fs.mkdirSync(pluginsPath, { recursive: true });
+        console.log('📁 Plugins directory created - add your plugin files here');
+    }
+} catch (error) {
+    console.log('⚠️ Error loading plugins:', error.message);
+    plugins = {};
+}
+
 if (fs.existsSync('2nd_dev_config.env')) require('dotenv').config({ path: './2nd_dev_config.env' });
 
 const { sms } = require("./msg");
@@ -54,6 +82,9 @@ try {
         clearMessages: () => {}
     });
 }
+
+// ... rest of your existing code continues exactly as before ...
+
 // MongoDB Configuration
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb+srv://ellyongiro8:QwXDXE6tyrGpUTNb@cluster0.tyxcmm9.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0';
 
