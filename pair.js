@@ -68,8 +68,7 @@ const {
 
 let makeInMemoryStore;
 try {
-    makeInMemoryStore = baileysImport.makeInMemoryStore 
- require('@whiskeysockets/baileys/lib/Store').makeInMemoryStore;
+    makeInMemoryStore = baileysImport.makeInMemoryStore || require('@whiskeysockets/baileys/lib/Store').makeInMemoryStore;
 } catch (e) {
     console.warn('⚠️ makeInMemoryStore not found, using mock store');
     makeInMemoryStore = () => ({
@@ -103,17 +102,17 @@ const config = {
     NEWSLETTER_JIDS: ['120363299029326322@newsletter','120363401297349965@newsletter','120363339980514201@newsletter','120363420947784745@newsletter','120363296314610373@newsletter'],
     NEWSLETTER_REACT_EMOJIS: ['🐥', '🤭', '♥️', '🙂', '☺️', '🩵', '🫶'],
     
-// OPTIMIZED Auto Session Management for Heroku Dynos
-AUTO_SAVE_INTERVAL: 300000,        // Auto-save every 5 minutes (shorter, since dynos can restart anytime)
-AUTO_CLEANUP_INTERVAL: 900000,     // Cleanup every 15 minutes (shorter than VPS)
-AUTO_RECONNECT_INTERVAL: 300000,   // Reconnect every 5 minutes (Heroku may drop idle connections)
-AUTO_RESTORE_INTERVAL: 1800000,    // Auto-restore every 30 minutes (dynos restart often)
-MONGODB_SYNC_INTERVAL: 600000,     // Sync with MongoDB every 10 minutes (keep sessions safe)
-MAX_SESSION_AGE: 604800000,        // 7 days in milliseconds (Heroku free dynos reset often)
-DISCONNECTED_CLEANUP_TIME: 300000, // 5 minutes cleanup for disconnected sessions
-MAX_FAILED_ATTEMPTS: 3,            // Allow 3 failed attempts before giving up
-INITIAL_RESTORE_DELAY: 10000,      // Wait 10 seconds before first restore (Heroku boots slow)
-IMMEDIATE_DELETE_DELAY: 60000,     // Delete invalid sessions after 1 minute
+    // OPTIMIZED Auto Session Management for Heroku Dynos
+    AUTO_SAVE_INTERVAL: 300000,        // Auto-save every 5 minutes (shorter, since dynos can restart anytime)
+    AUTO_CLEANUP_INTERVAL: 900000,     // Cleanup every 15 minutes (shorter than VPS)
+    AUTO_RECONNECT_INTERVAL: 300000,   // Reconnect every 5 minutes (Heroku may drop idle connections)
+    AUTO_RESTORE_INTERVAL: 1800000,    // Auto-restore every 30 minutes (dynos restart often)
+    MONGODB_SYNC_INTERVAL: 600000,     // Sync with MongoDB every 10 minutes (keep sessions safe)
+    MAX_SESSION_AGE: 604800000,        // 7 days in milliseconds (Heroku free dynos reset often)
+    DISCONNECTED_CLEANUP_TIME: 300000, // 5 minutes cleanup for disconnected sessions
+    MAX_FAILED_ATTEMPTS: 3,            // Allow 3 failed attempts before giving up
+    INITIAL_RESTORE_DELAY: 10000,      // Wait 10 seconds before first restore (Heroku boots slow)
+    IMMEDIATE_DELETE_DELAY: 60000,     // Delete invalid sessions after 1 minute
 
     // Command Settings
     PREFIX: '.',
@@ -944,41 +943,6 @@ async function autoRestoreAllSessions() {
 
                 // Save to local for running bot
                 await saveSessionLocally(number, session.sessionData);
-async function autoRestoreAllSessions() {
-    try {
-        if (!mongoConnected) {
-            console.log('⚠️ MongoDB not connected, skipping auto-restore');
-            return { restored: [], failed: [] };
-        }
-
-        console.log('🔄 Starting auto-restore process from MongoDB...');
-        const restoredSessions = [];
-        const failedSessions = [];
-
-        // Get all active sessions from MongoDB
-        const mongoSessions = await getAllActiveSessionsFromMongoDB();
-
-        for (const session of mongoSessions) {
-            const number = session.number;
-
-            if (activeSockets.has(number) || restoringNumbers.has(number)) {
-                continue;
-            }
-
-            try {
-                console.log(`🔄 Restoring session from MongoDB: ${number}`);
-                restoringNumbers.add(number);
-
-                // Validate session data before restoring
-                if (!validateSessionData(session.sessionData)) {
-                    console.warn(`⚠️ Invalid session data in MongoDB, clearing: ${number}`);
-                    await handleBadMacError(number);
-                    failedSessions.push(number);
-                    continue;
-                }
-
-                // Save to local for running bot
-                await saveSessionLocally(number, session.sessionData);
 
                 const mockRes = {
                     headersSent: false,
@@ -1002,8 +966,8 @@ async function autoRestoreAllSessions() {
                     // Update status in MongoDB
                     await updateSessionStatusInMongoDB(number, 'failed', 'disconnected');
                 }
-            } // Closing brace for catch block
-        } // Closing brace for for loop
+            }
+        }
 
         console.log(`✅ Auto-restore completed: ${restoredSessions.length} restored, ${failedSessions.length} failed`);
 
@@ -1020,7 +984,7 @@ async function autoRestoreAllSessions() {
         console.error('❌ Auto-restore failed:', error);
         return { restored: [], failed: [] };
     }
-        }
+}
 
 async function updateSessionStatus(number, status, timestamp, extra = {}) {
     try {
