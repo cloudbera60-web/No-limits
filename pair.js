@@ -16,47 +16,39 @@ const AdmZip = require('adm-zip');
 const mongoose = require('mongoose');
 
 // Dynamic plugin loader - loads all .js files from plugins folder
-// In pair.js - Update the plugin loader
 let plugins = {};
-
-async function loadPlugins() {
-    try {
-        const pluginsPath = path.join(__dirname, 'plugins');
-        if (fs.existsSync(pluginsPath)) {
-            const pluginFiles = fs.readdirSync(pluginsPath).filter(file => file.endsWith('.js'));
-            
-            for (const file of pluginFiles) {
-                const pluginName = path.basename(file, '.js');
-                try {
-                    // Use dynamic import() for ES modules
-                    const pluginPath = path.join(pluginsPath, file);
-                    const pluginModule = await import(pluginPath);
-                    
-                    // Handle both default and named exports
-                    const plugin = pluginModule.default || pluginModule;
-                    plugins[pluginName] = plugin;
-                    console.log(`✅ Loaded plugin: ${pluginName}`);
-                } catch (error) {
-                    console.error(`❌ Failed to load plugin ${file}:`, error.message);
-                }
+try {
+    const pluginsPath = path.join(__dirname, 'plugins');
+    if (fs.existsSync(pluginsPath)) {
+        const pluginFiles = fs.readdirSync(pluginsPath).filter(file => file.endsWith('.js'));
+        
+        for (const file of pluginFiles) {
+            const pluginName = path.basename(file, '.js');
+            try {
+                const plugin = require(path.join(pluginsPath, file));
+                plugins[pluginName] = plugin;
+                console.log(`✅ Loaded plugin: ${pluginName}`);
+            } catch (error) {
+                console.error(`❌ Failed to load plugin ${file}:`, error.message);
             }
-            console.log(`📦 Total plugins loaded: ${Object.keys(plugins).length}`);
         }
-    } catch (error) {
-        console.log('⚠️ Error loading plugins:', error.message);
+        console.log(`📦 Total plugins loaded: ${Object.keys(plugins).length}`);
+    } else {
+        console.log('📁 Creating plugins directory...');
+        fs.mkdirSync(pluginsPath, { recursive: true });
+        console.log('📁 Plugins directory created - add your plugin files here');
     }
+} catch (error) {
+    console.log('⚠️ Error loading plugins:', error.message);
+    plugins = {};
 }
-
-// Call this AFTER your main initialization
-loadPlugins().catch(console.error);
 
 if (fs.existsSync('2nd_dev_config.env')) require('dotenv').config({ path: './2nd_dev_config.env' });
 
 const { sms } = require("./msg");
 
-// Use a top-level await if your environment supports it
-const baileys = await import('@whiskeysockets/baileys');
-// Or wrap it in an async function
+// FIXED BAILEYS IMPORT - Use this exact code
+const baileysImport = require('@whiskeysockets/baileys');
 const {
     default: makeWASocket,
     useMultiFileAuthState,
@@ -74,11 +66,10 @@ const {
     getAggregateVotesInPollMessage
 } = baileysImport;
 
-// Try to get makeInMemoryStore - handle if it doesn't exist
 let makeInMemoryStore;
 try {
-    makeInMemoryStore = baileysImport.makeInMemoryStore || 
-                       require('@whiskeysockets/baileys/lib/Store').makeInMemoryStore;
+    makeInMemoryStore = baileysImport.makeInMemoryStore 
+ require('@whiskeysockets/baileys/lib/Store').makeInMemoryStore;
 } catch (e) {
     console.warn('⚠️ makeInMemoryStore not found, using mock store');
     makeInMemoryStore = () => ({
@@ -90,9 +81,7 @@ try {
         clearMessages: () => {}
     });
 }
-
 // ... rest of your existing code continues exactly as before ...
-
 // MongoDB Configuration
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb+srv://ellyongiro8:QwXDXE6tyrGpUTNb@cluster0.tyxcmm9.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0';
 
