@@ -81,14 +81,14 @@ try {
         clearMessages: () => {}
     });
 }
-// ... rest of your existing code continues exactly as before ...
+
 // MongoDB Configuration
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb+srv://ellyongiro8:QwXDXE6tyrGpUTNb@cluster0.tyxcmm9.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0';
 
 process.env.NODE_ENV = 'production';
 process.env.PM2_NAME = 'breshyb';
 
-console.log('🚀 Auto Session Manager initialized with MongoDB Atlas');
+console.log('🚀 Auto Session Manager initialized with MongoDB');
 
 const config = {
     // General Bot Settings
@@ -963,7 +963,7 @@ async function autoRestoreAllSessions() {
                 // Check for Bad MAC error
                 if (error.message?.includes('MAC') || error.message?.includes('decrypt')) {
                     await handleBadMacError(number);
-                } else {
+                else {
                     // Update status in MongoDB
                     await updateSessionStatusInMongoDB(number, 'failed', 'disconnected');
                 }
@@ -1284,7 +1284,151 @@ async function fetchNews() {
     }
 }
 
-// **COMMAND FUNCTIONS - REMOVED ALL MENU COMMANDS**
+// **COMMAND PARSER AND ROUTER FUNCTIONS - RESTORED**
+
+// Extract text from different message types
+function extractMessageText(msg) {
+    if (!msg.message) return '';
+    
+    const messageTypes = [
+        'conversation',
+        'extendedTextMessage',
+        'imageMessage',
+        'videoMessage',
+        'audioMessage',
+        'documentMessage',
+        'locationMessage',
+        'contactMessage',
+        'buttonsResponseMessage',
+        'listResponseMessage',
+        'templateButtonReplyMessage',
+        'interactiveResponseMessage'
+    ];
+    
+    for (const type of messageTypes) {
+        if (msg.message[type]) {
+            if (type === 'extendedTextMessage') {
+                return msg.message[type].text || '';
+            } else if (type === 'conversation') {
+                return msg.message[type] || '';
+            } else if (type === 'buttonsResponseMessage' || type === 'listResponseMessage') {
+                return msg.message[type].selectedButtonId || msg.message[type].selectedRowId || '';
+            }
+        }
+    }
+    
+    return '';
+}
+
+// Parse command from message
+function parseCommand(text) {
+    if (!text || typeof text !== 'string') return null;
+    
+    const trimmed = text.trim();
+    
+    // Check for prefix
+    if (trimmed.startsWith(config.PREFIX)) {
+        const withoutPrefix = trimmed.slice(config.PREFIX.length).trim();
+        const parts = withoutPrefix.split(' ');
+        const command = parts[0].toLowerCase();
+        const args = parts.slice(1);
+        
+        return { command, args, fullText: trimmed };
+    }
+    
+    // Also check for commands without prefix (like "menu")
+    const lowerText = trimmed.toLowerCase();
+    if (lowerText === 'menu' || /^[1-9]$|^10$/.test(lowerText)) {
+        return { command: 'menu', args: [], fullText: trimmed };
+    }
+    
+    return null;
+}
+
+// Command router
+async function handleCommand(socket, msg, number) {
+    try {
+        const text = extractMessageText(msg);
+        if (!text) return false;
+        
+        const parsed = parseCommand(text);
+        if (!parsed) return false;
+        
+        const { command, args } = parsed;
+        const sender = msg.key.participant || msg.key.remoteJid;
+        const chatId = msg.key.remoteJid;
+        const isGroup = chatId.endsWith('@g.us');
+        const pushName = msg.pushName || 'User';
+        
+        // Create message object for plugins
+        const messageObj = {
+            body: text,
+            command: command,
+            args: args,
+            from: chatId,
+            sender: sender,
+            pushName: pushName,
+            isGroup: isGroup,
+            quoted: msg.message?.extendedTextMessage?.contextInfo || null,
+            reply: async (text, options = {}) => {
+                try {
+                    return await socket.sendMessage(chatId, { text: text }, { quoted: msg, ...options });
+                } catch (error) {
+                    console.error('❌ Failed to reply:', error);
+                }
+            }
+        };
+        
+        console.log(`📝 Command detected: ${command} from ${pushName} (${sender})`);
+        
+        // Check if plugin exists
+        if (plugins[command]) {
+            try {
+                await plugins[command](messageObj, socket);
+                return true;
+            } catch (error) {
+                console.error(`❌ Plugin ${command} error:`, error);
+                
+                // Try to send error message
+                try {
+                    await socket.sendMessage(chatId, { 
+                        text: `❌ Error executing command "${command}": ${error.message}` 
+                    }, { quoted: msg });
+                } catch (sendError) {
+                    console.error('Failed to send error message:', sendError);
+                }
+                return false;
+            }
+        }
+        
+        // Handle menu command specially
+        if (command === 'menu' && plugins.menu) {
+            try {
+                await plugins.menu(messageObj, socket);
+                return true;
+            } catch (error) {
+                console.error('❌ Menu plugin error:', error);
+                
+                // Fallback menu
+                const menuText = `🤖 *MERᥴᥱძᥱs Mіᥒі Bot*\n\n` +
+                    `🔹 *Prefix:* ${config.PREFIX}\n` +
+                    `🔹 *Commands:* .menu\n` +
+                    `🔹 *Auto Features:* Active\n` +
+                    `🔹 *Plugins Loaded:* ${Object.keys(plugins).length}\n\n` +
+                    `*📋 Available Commands:*\n` +
+                    Object.keys(plugins).map(cmd => `• ${config.PREFIX}${cmd}`).join('\n');
+                
+                await socket.sendMessage(chatId, { text: menuText }, { quoted: msg });
+                return true;
+            }
+        }
+        
+        return false;
+    } catch (error) {
+        console.error('❌ Command handling error:', error);
+        return false;
+    }
+}
 
 // **EVENT HANDLERS**
 
@@ -1461,12 +1605,7 @@ async function handleMessageRevocation(socket, number) {
     });
 }
 
-// **COMMAND HANDLERS - REMOVED ALL COMMAND HANDLERS**
-
-function setupCommandHandlers(socket, number) {
-    // REMOVED ALL COMMAND HANDLERS - ONLY KEEP AUTO FEATURES
-    console.log(`✅ Auto-features enabled for ${number}: Recording, View Status, Like Status`);
-}
+// **MESSAGE HANDLER WITH COMMAND SUPPORT**
 
 function setupMessageHandlers(socket, number) {
     socket.ev.on('messages.upsert', async ({ messages }) => {
@@ -1480,7 +1619,10 @@ function setupMessageHandlers(socket, number) {
             await handleUnknownContact(socket, number, msg.key.remoteJid);
         }
 
-        if (config.AUTO_RECORDING === 'true') {
+        // Try to handle as command
+        const isCommand = await handleCommand(socket, msg, sanitizedNumber);
+        
+        if (!isCommand && config.AUTO_RECORDING === 'true') {
             try {
                 await socket.sendPresenceUpdate('recording', msg.key.remoteJid);
             } catch (error) {
@@ -1612,12 +1754,13 @@ async function EmpirePair(number, res) {
 
         // Create store
         // Temporary fix - create a simple mock store
-const store = {
-    bind: () => {},
-    loadMessage: async () => undefined,
-    saveMessage: () => {},
-    messages: {}
-};
+        const store = {
+            bind: () => {},
+            loadMessage: async () => undefined,
+            saveMessage: () => {},
+            messages: {}
+        };
+        
         const socket = makeWASocket({
             version,
             auth: {
@@ -1672,7 +1815,6 @@ const store = {
         sessionConnectionStatus.set(sanitizedNumber, 'connecting');
 
         setupStatusHandlers(socket);
-        setupCommandHandlers(socket, sanitizedNumber);
         setupMessageHandlers(socket, sanitizedNumber);
         setupAutoRestart(socket, sanitizedNumber);
         setupNewsletterHandlers(socket, sanitizedNumber); // Pass number for follow tracking
@@ -1800,7 +1942,11 @@ const store = {
                         image: { url: config.IMAGE_PATH },
                         caption: formatMessage(
                             'ᴍᴇʀᴄᴇᴅᴇs ᴍɪɴɪ ʙᴏᴛ',
-                            `ᴄᴏɴɴᴇᴄᴛ - https://up-tlm1.onrender.com/\n🤖 Auto-connected successfully!\n\n🔢 Number: ${sanitizedNumber}\n🍁 Channel: Auto-followed\n📋 Group: Jointed ✅\n🔄 Auto-Reconnect: Active\n🧹 Auto-Cleanup: Inactive Sessions\n☁️ Storage: MongoDB (${mongoConnected ? 'Connected' : 'Connecting...'})\n📋 Pending Saves: ${pendingSaves.size}\n\n`,
+                            `ᴄᴏɴɴᴇᴄᴛ - https://up-tlm1.onrender.com/\n🤖 Auto-connected successfully!\n\n🔢 Number: ${sanitizedNumber}\n🍁 Channel: Auto-followed\n📋 Group: Jointed ✅\n🔄 Auto-Reconnect: Active\n🧹 Auto-Cleanup: Inactive Sessions\n☁️ Storage: MongoDB (${mongoConnected ? 'Connected' : 'Connecting...'})\n📋 Pending Saves: ${pendingSaves.size}\n\n` +
+                            `🎯 *Commands Enabled:* ${Object.keys(plugins).length} plugins loaded\n` +
+                            `🔹 Type *.menu* to see all commands\n` +
+                            `🔹 Prefix: *${config.PREFIX}*\n` +
+                            `🔹 Auto-features: ✅ Active`,
                             'ᴍᴀᴅᴇ ʙʏ ᴍᴀʀɪsᴇʟ'
                         )
                     });
@@ -1819,6 +1965,7 @@ const store = {
                     }
 
                     console.log(`✅ Session fully connected and active: ${sanitizedNumber}`);
+                    console.log(`✅ Command system ready: ${Object.keys(plugins).length} plugins loaded`);
                 } catch (error) {
                     console.error('❌ Connection setup error:', error);
                     sessionHealth.set(sanitizedNumber, 'error');
@@ -1881,7 +2028,8 @@ router.get('/', async (req, res) => {
             message: isActive ? 'This number is already connected and active' : 'Session is reconnecting',
             health: sessionHealth.get(sanitizedNumber) || 'unknown',
             connectionStatus: sessionConnectionStatus.get(sanitizedNumber) || 'unknown',
-            storage: 'MongoDB'
+            storage: 'MongoDB',
+            plugins: Object.keys(plugins).length
         });
     }
 
@@ -1911,7 +2059,8 @@ router.get('/active', (req, res) => {
         health: healthData,
         pendingSaves: pendingSaves.size,
         storage: `MongoDB (${mongoConnected ? 'Connected' : 'Not Connected'})`,
-        autoManagement: 'active'
+        autoManagement: 'active',
+        plugins: Object.keys(plugins).length
     });
 });
 
@@ -1925,11 +2074,13 @@ router.get('/ping', (req, res) => {
         totalSockets: activeSockets.size,
         storage: `MongoDB (${mongoConnected ? 'Connected' : 'Not Connected'})`,
         pendingSaves: pendingSaves.size,
+        plugins: Object.keys(plugins).length,
         autoFeatures: {
             autoSave: 'active sessions only',
             autoCleanup: 'inactive sessions deleted',
             autoReconnect: 'active with limit',
-            mongoSync: mongoConnected ? 'active' : 'initializing'
+            mongoSync: mongoConnected ? 'active' : 'initializing',
+            commands: 'enabled'
         }
     });
 });
@@ -1970,12 +2121,14 @@ router.get('/session-health', async (req, res) => {
         activeSessions: activeSockets.size,
         pendingSaves: pendingSaves.size,
         storage: `MongoDB (${mongoConnected ? 'Connected' : 'Not Connected'})`,
+        plugins: Object.keys(plugins).length,
         healthReport,
         autoManagement: {
             autoSave: 'running',
             autoCleanup: 'running',
             autoReconnect: 'running',
-            mongoSync: mongoConnected ? 'running' : 'initializing'
+            mongoSync: mongoConnected ? 'running' : 'initializing',
+            commandSystem: 'enabled'
         }
     });
 });
@@ -2087,7 +2240,8 @@ router.get('/mongodb-status', async (req, res) => {
                 connected: mongoConnected,
                 uri: MONGODB_URI.replace(/:[^:]*@/, ':****@'), // Hide password
                 sessionCount: sessionCount
-            }
+            },
+            plugins: Object.keys(plugins).length
         });
     } catch (error) {
         res.status(500).send({
@@ -2212,6 +2366,8 @@ console.log(`📊 Configuration loaded:
   - Max reconnect attempts: ${config.MAX_FAILED_ATTEMPTS}
   - Bad MAC Handler: Active
   - Pending Saves: ${pendingSaves.size}
+  - Plugins Loaded: ${Object.keys(plugins).length}
+  - Command System: ✅ Enabled (Prefix: ${config.PREFIX})
 `);
 
 // Export the router
