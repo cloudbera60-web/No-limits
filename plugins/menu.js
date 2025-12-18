@@ -1,10 +1,11 @@
-import moment from 'moment-timezone';
-import fs from 'fs';
-import os from 'os';
-import pkg from '@whiskeysockets/baileys';
+// plugins/menu.js - CONVERT TO COMMONJS
+const moment = require('moment-timezone');
+const fs = require('fs');
+const os = require('os');
+const pkg = require('@whiskeysockets/baileys');
 const { generateWAMessageFromContent, proto } = pkg;
-import config from '../config.cjs';
-import axios from 'axios';
+const config = require('../config.cjs');
+const axios = require('axios');
 
 const getUserStats = async (user) => {
     return { menuCount: 5 };
@@ -221,4 +222,5 @@ const menu = async (m, Matrix) => {
     }
 };
 
-export default menu;
+// CommonJS export instead of ES Module export
+module.exports = menu;
