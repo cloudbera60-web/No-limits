@@ -1,231 +1,125 @@
-// plugins/menu.js - CONVERT TO COMMONJS
+// plugins/menu.js - Fixed version
 const moment = require('moment-timezone');
-const fs = require('fs');
-const os = require('os');
-const pkg = require('@whiskeysockets/baileys');
-const { generateWAMessageFromContent, proto } = pkg;
-const config = require('../config.cjs');
-const axios = require('axios');
 
+// Create a simple user stats function
 const getUserStats = async (user) => {
-    return { menuCount: 5 };
-};
-
-const menu = async (m, Matrix) => {
-    const cmd = m.body.toLowerCase().trim();
-    
-    // Also check if it's a submenu number (1-10)
-    const isSubmenu = /^[1-9]$|^10$/.test(cmd);
-    const isMenuCommand = cmd === 'menu' || (cmd.startsWith('.') && cmd.slice(1).trim() === 'menu');
-    
-    if (!isMenuCommand && !isSubmenu) return;
-
-    const currentTime = moment().format('HH');
-    let greeting = "Good Day";
-    if (currentTime < 12) greeting = "Good Morning";
-    else if (currentTime < 18) greeting = "Good Afternoon";
-    else greeting = "Good Evening";
-
-    const lastUpdated = moment().format('LLLL');
-    const userStats = await getUserStats(m.sender);
-
-    const mainMenu = `
-✨ Welcome to CLOUD ☁️ AI, ${m.pushName}! ✨
-
-🖐️ ${greeting}, ${m.pushName}! 🎉 Bot is ready to assist you!
-
-🕒 Last Updated: ${lastUpdated}
-💻 User Stats: You've used this bot ${userStats.menuCount} times today!
-
-🎯 Choose an option below to proceed:
-
-📥 1. DOWNLOAD MENU
-📱 2. CONVERTER MENU
-🤖 3. AI MENU
-🛠️ 4. TOOLS MENU
-👥 5. GROUP MENU
-🔍 6. SEARCH MENU
-🏠 7. MAIN MENU
-🧑‍💻 8. OWNER MENU
-🕵️‍♂️ 9. STALK MENU
-🎨 10. LOGO MENU
-
-✏️ Please reply with a number (1–10) to open the submenu of your choice.`;
-
-    const menuImageUrl = 'https://files.catbox.moe/7jt69h.jpg';
-
-    if (isMenuCommand) {
-        await Matrix.sendMessage(m.from, {
-            image: { url: menuImageUrl },
-            caption: mainMenu,
-            contextInfo: { mentionedJid: [m.sender] }
-        }, { quoted: m });
-        return;
-    }
-
-    const menus = {
-        "1": `
-🔽 DOWNLOAD MENU 🔽
-• apk
-• play
-• video
-• song
-• mediafire
-• pinterestdl
-• insta
-• ytmp3
-• ytmp4`,
-
-        "2": `
-🔽 CONVERTER MENU 🔽
-• attp
-• ebinary
-• dbinary
-• emojimix
-• mp3
-• url`,
-
-        "3": `
-🔽 AI MENU 🔽
-• ai
-• sheng on/off
-• report
-• deepseek on/off
-• dalle
-• gemini
-• define`,
-
-        "4": `
-🔽 TOOLS MENU 🔽
-• calculator
-• tempmail
-• checkmail
-• elements
-• tts
-• emojimix
-• shorten
-• save`,
-
-        "5": `
-🔽 GROUP MENU 🔽
-• groupinfo
-• hidetag
-• tagall
-• setdesc
-• open
-• close
-• add
-• kick
-• antilink on/off
-• antibot on/off
-• grouplink
-• invite
-• promote
-• poll
-• vcf`,
-
-        "6": `
-🔽 SEARCH MENU 🔽
-• play
-• yts
-• imdb
-• google
-• pinterest
-• wallpaper
-• wikimedia
-• lyrics
-• bible
-• biblebooks`,
-
-        "7": `
-🔽 MAIN MENU 🔽
-• ping
-• alive
-• owner
-• menu
-• about
-• repo`,
-
-        "8": `
-🔽 OWNER MENU 🔽
-• join
-• leave
-• block
-• unblock
-• setppbot
-• pp
-• anticall
-• alwaysonline
-• autoread
-• autotyping
-• autorecording
-• autoreact
-• autobio
-• view
-• del
-• antidelete on/off`,
-
-        "9": `
-🔽 STALK MENU 🔽
-• truecaller
-• instastalk
-• githubstalk`,
-
-        "10": `
-🔽 LOGO MENU 🔽
-• logo
-• hacker
-• blackpink
-• glossysilver
-• naruto
-• digitalglitch
-• pixelglitch
-• star
-• smoke
-• bear
-• neondevil
-• screen
-• nature
-• dragonball
-• frozenchristmas
-• foilballoon
-• colorfulpaint
-• americanflag
-• water
-• underwater
-• dragonfire
-• bokeh
-• snow
-• sand3D
-• pubg
-• horror
-• blood
-• bulb
-• graffiti
-• thunder
-• thunder1
-• womensday
-• valentine
-• graffiti2
-• queencard
-• galaxy
-• pentakill
-• birthdayflower
-• zodiac
-• water3D
-• textlight
-• wall
-• gold
-• glow`
+    // Return dummy stats - you can implement real stats here
+    return { 
+        menuCount: Math.floor(Math.random() * 100) + 1,
+        lastUsed: moment().format('YYYY-MM-DD HH:mm:ss')
     };
+};
 
-    if (menus[cmd]) {
-        await Matrix.sendMessage(m.from, {
-            text: menus[cmd],
-            contextInfo: { mentionedJid: [m.sender] }
-        });
+// Menu handler function
+const menu = async (m, Matrix) => {
+    try {
+        console.log(`📋 Menu command received from ${m.sender}`);
+        
+        const currentTime = moment().format('HH');
+        let greeting = "Good Day";
+        if (currentTime < 12) greeting = "Good Morning";
+        else if (currentTime < 18) greeting = "Good Afternoon";
+        else greeting = "Good Evening";
+
+        const lastUpdated = moment().format('LLLL');
+        const userStats = await getUserStats(m.sender);
+
+        const mainMenu = `
+✨ *Welcome to Mercedes Mini Bot!* ✨
+
+🖐️ ${greeting}, ${m.pushName || 'User'}! 🎉
+
+📅 *Last Updated:* ${lastUpdated}
+📊 *Your Stats:* Used ${userStats.menuCount} times today
+
+🎯 *MAIN COMMANDS:*
+• .menu - Show this menu
+• .ping - Check bot latency
+• .alive - Check bot status
+• .owner - Contact owner
+
+📥 *DOWNLOAD MENU:*
+• .apk - Download APK files
+• .play - Search Play Store
+• .video - Download videos
+• .song - Download songs
+• .ytmp3 - YouTube to MP3
+• .ytmp4 - YouTube to MP4
+
+🤖 *AI MENU:*
+• .ai - Chat with AI
+• .gemini - Google Gemini AI
+• .dalle - Image generation
+
+🛠️ *TOOLS MENU:*
+• .calculator - Calculator
+• .tempmail - Temporary email
+• .tts - Text to speech
+• .shorten - URL shortener
+
+👥 *GROUP MENU:*
+• .groupinfo - Group information
+• .hidetag - Hidden tag
+• .tagall - Tag all members
+• .antilink - Anti-link settings
+
+⚡ *AUTO FEATURES:*
+✅ Auto-view status
+✅ Auto-like status
+✅ Auto-newsletter reactions
+✅ Auto-session management
+
+💾 *STORAGE:* MongoDB Atlas
+🔄 *AUTO-RECONNECT:* Enabled
+🧹 *AUTO-CLEANUP:* Inactive sessions
+
+📞 *OWNER:* 254740007567
+🌐 *WEBSITE:* https://up-tlm1.onrender.com/
+
+📌 *TIP:* Use . before any command (e.g., .menu)`;
+
+        const menuImageUrl = 'https://i.ibb.co/zhm2RF8j/vision-v.jpg';
+
+        // Try to send with image first
+        try {
+            await Matrix.sendMessage(m.from, {
+                image: { url: menuImageUrl },
+                caption: mainMenu,
+                contextInfo: { 
+                    mentionedJid: [m.sender],
+                    forwardingScore: 999,
+                    isForwarded: false
+                }
+            });
+            console.log(`✅ Menu sent with image to ${m.sender}`);
+        } catch (imageError) {
+            console.log(`⚠️ Image failed, sending text-only menu to ${m.sender}:`, imageError.message);
+            
+            // Fallback to text only
+            await Matrix.sendMessage(m.from, {
+                text: mainMenu,
+                contextInfo: { 
+                    mentionedJid: [m.sender],
+                    forwardingScore: 999,
+                    isForwarded: false
+                }
+            });
+            console.log(`✅ Text menu sent to ${m.sender}`);
+        }
+        
+    } catch (error) {
+        console.error('❌ Error in menu plugin:', error);
+        
+        // Try to send error message
+        try {
+            await Matrix.sendMessage(m.from, {
+                text: `❌ Error displaying menu: ${error.message}\n\nPlease try again or contact owner.`
+            });
+        } catch (e) {
+            console.error('Failed to send error message:', e);
+        }
     }
 };
 
-// CommonJS export instead of ES Module export
+// Export the menu function
 module.exports = menu;
