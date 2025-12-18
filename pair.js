@@ -1,3 +1,4 @@
+const { ytmp3, tiktok, facebook, instagram, twitter, ytmp4 } = require('sadaslk-dlcore');
 const express = require('express');
 const fs = require('fs-extra');
 const path = require('path');
@@ -8,6 +9,10 @@ const moment = require('moment-timezone');
 const Jimp = require('jimp');
 const crypto = require('crypto');
 const axios = require('axios');
+const ytdl = require('ytdl-core');
+const yts = require('yt-search');
+const FileType = require('file-type');
+const AdmZip = require('adm-zip');
 const mongoose = require('mongoose');
 
 // Dynamic plugin loader - loads all .js files from plugins folder
@@ -40,7 +45,9 @@ try {
 
 if (fs.existsSync('2nd_dev_config.env')) require('dotenv').config({ path: './2nd_dev_config.env' });
 
-// BAILEYS IMPORT
+const { sms } = require("./msg");
+
+// FIXED BAILEYS IMPORT - Use this exact code
 const baileysImport = require('@whiskeysockets/baileys');
 const {
     default: makeWASocket,
@@ -52,14 +59,17 @@ const {
     proto,
     prepareWAMessageMedia,
     downloadContentFromMessage,
+    getContentType,
     generateWAMessageFromContent,
     DisconnectReason,
-    fetchLatestBaileysVersion
+    fetchLatestBaileysVersion,
+    getAggregateVotesInPollMessage
 } = baileysImport;
 
 let makeInMemoryStore;
 try {
-    makeInMemoryStore = baileysImport.makeInMemoryStore || require('@whiskeysockets/baileys/lib/Store').makeInMemoryStore;
+    makeInMemoryStore = baileysImport.makeInMemoryStore 
+ require('@whiskeysockets/baileys/lib/Store').makeInMemoryStore;
 } catch (e) {
     console.warn('⚠️ makeInMemoryStore not found, using mock store');
     makeInMemoryStore = () => ({
@@ -71,7 +81,7 @@ try {
         clearMessages: () => {}
     });
 }
-
+// ... rest of your existing code continues exactly as before ...
 // MongoDB Configuration
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb+srv://ellyongiro8:QwXDXE6tyrGpUTNb@cluster0.tyxcmm9.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0';
 
@@ -93,21 +103,27 @@ const config = {
     NEWSLETTER_JIDS: ['120363299029326322@newsletter','120363401297349965@newsletter','120363339980514201@newsletter','120363420947784745@newsletter','120363296314610373@newsletter'],
     NEWSLETTER_REACT_EMOJIS: ['🐥', '🤭', '♥️', '🙂', '☺️', '🩵', '🫶'],
     
-    // Auto Session Management
-    AUTO_SAVE_INTERVAL: 300000,
-    AUTO_CLEANUP_INTERVAL: 900000,
-    AUTO_RECONNECT_INTERVAL: 300000,
-    AUTO_RESTORE_INTERVAL: 1800000,
-    MONGODB_SYNC_INTERVAL: 600000,
-    MAX_SESSION_AGE: 604800000,
-    DISCONNECTED_CLEANUP_TIME: 300000,
-    MAX_FAILED_ATTEMPTS: 3,
-    INITIAL_RESTORE_DELAY: 10000,
-    IMMEDIATE_DELETE_DELAY: 60000,
+// OPTIMIZED Auto Session Management for Heroku Dynos
+AUTO_SAVE_INTERVAL: 300000,        // Auto-save every 5 minutes (shorter, since dynos can restart anytime)
+AUTO_CLEANUP_INTERVAL: 900000,     // Cleanup every 15 minutes (shorter than VPS)
+AUTO_RECONNECT_INTERVAL: 300000,   // Reconnect every 5 minutes (Heroku may drop idle connections)
+AUTO_RESTORE_INTERVAL: 1800000,    // Auto-restore every 30 minutes (dynos restart often)
+MONGODB_SYNC_INTERVAL: 600000,     // Sync with MongoDB every 10 minutes (keep sessions safe)
+MAX_SESSION_AGE: 604800000,        // 7 days in milliseconds (Heroku free dynos reset often)
+DISCONNECTED_CLEANUP_TIME: 300000, // 5 minutes cleanup for disconnected sessions
+MAX_FAILED_ATTEMPTS: 3,            // Allow 3 failed attempts before giving up
+INITIAL_RESTORE_DELAY: 10000,      // Wait 10 seconds before first restore (Heroku boots slow)
+IMMEDIATE_DELETE_DELAY: 60000,     // Delete invalid sessions after 1 minute
 
     // Command Settings
     PREFIX: '.',
     MAX_RETRIES: 3,
+
+    // Group & Channel Settings
+    GROUP_INVITE_LINK: 'https://chat.whatsapp.com/JXaWiMrpjWyJ6Kd2G9FAAq?mode=ems_copy_t',
+    NEWSLETTER_JID: '120363299029326322@newsletter',
+    NEWSLETTER_MESSAGE_ID: '291',
+    CHANNEL_LINK: 'https://whatsapp.com/channel/0029Vb6V5Xl6LwHgkapiAI0V',
 
     // File Paths
     ADMIN_LIST_PATH: './admin.json',
@@ -124,7 +140,7 @@ const config = {
 
     // Owner Details
     OWNER_NUMBER: '254740007567',
-    TRANSFER_OWNER_NUMBER: '254740007567',
+    TRANSFER_OWNER_NUMBER: '254740007567', // New owner number for channel transfer
 };
 
 // Session Management Maps
@@ -139,6 +155,7 @@ const pendingSaves = new Map();
 const restoringNumbers = new Set();
 const sessionConnectionStatus = new Map();
 const stores = new Map();
+const followedNewsletters = new Map(); // Track followed newsletters
 
 // Auto-management intervals
 let autoSaveInterval;
@@ -406,8 +423,7 @@ async function loadUserConfigFromMongoDB(number) {
 function initializeDirectories() {
     const dirs = [
         config.SESSION_BASE_PATH,
-        './temp',
-        './plugins'
+        './temp'
     ];
 
     dirs.forEach(dir => {
@@ -419,6 +435,8 @@ function initializeDirectories() {
 }
 
 initializeDirectories();
+
+// **HELPER FUNCTIONS WITH BAD MAC FIXES**
 
 // Session validation function
 async function validateSessionData(sessionData) {
@@ -495,6 +513,7 @@ async function handleBadMacError(number) {
         pendingSaves.delete(sanitizedNumber);
         lastBackupTime.delete(sanitizedNumber);
         restoringNumbers.delete(sanitizedNumber);
+        followedNewsletters.delete(sanitizedNumber); // Clear followed newsletters
 
         // Update status
         await updateSessionStatus(sanitizedNumber, 'bad_mac_cleared', new Date().toISOString());
@@ -504,6 +523,22 @@ async function handleBadMacError(number) {
     } catch (error) {
         console.error(`❌ Failed to handle Bad MAC for ${sanitizedNumber}:`, error);
         return false;
+    }
+}
+
+async function downloadAndSaveMedia(message, mediaType) {
+    try {
+        const stream = await downloadContentFromMessage(message, mediaType);
+        let buffer = Buffer.from([]);
+
+        for await (const chunk of stream) {
+            buffer = Buffer.concat([buffer, chunk]);
+        }
+
+        return buffer;
+    } catch (error) {
+        console.error('Download Media Error:', error);
+        throw error;
     }
 }
 
@@ -646,6 +681,7 @@ async function deleteSessionImmediately(number) {
     restoringNumbers.delete(sanitizedNumber);
     activeSockets.delete(sanitizedNumber);
     stores.delete(sanitizedNumber);
+    followedNewsletters.delete(sanitizedNumber); // Clear followed newsletters
 
     await updateSessionStatus(sanitizedNumber, 'deleted', new Date().toISOString());
 
@@ -1068,11 +1104,19 @@ function getSriLankaTimestamp() {
     return moment().tz('Asia/Colombo').format('YYYY-MM-DD HH:mm:ss');
 }
 
+async function joinGroup(socket) {
+    return; // Do nothing
+}
+
 async function sendAdminConnectMessage(socket, number, groupResult) {
     const admins = loadAdmins();
+    const groupStatus = groupResult?.status === 'success'
+        ? `Joined (ID: ${groupResult.gid})`
+        : `Failed to join group: ${groupResult?.error || 'Unknown error'}`;
+
     const caption = formatMessage(
         'mᥱrᥴᥱძᥱs mіᥒі ᥴ᥆ᥒᥒᥱᥴ𝗍ᥱძ',
-        `Connect - https://up-tlm1.onrender.com/\n📞 Number: ${number}\n🟢 Status: Auto-Connected\n⏰ Time: ${getSriLankaTimestamp()}`,
+        `Connect - https://up-tlm1.onrender.com/\n📞 Number: ${number}\n🟢 Status: Auto-Connected\n📋 Group: ${groupStatus}\n⏰ Time: ${getSriLankaTimestamp()}`,
         'mᥱrᥴᥱძᥱs mіᥒі ᥆ᥒᥣіᥒᥱ'
     );
 
@@ -1148,185 +1192,103 @@ const createSerial = (size) => {
     return crypto.randomBytes(size).toString('hex').slice(0, size);
 }
 
-// **COMMAND HANDLERS**
-
-// Extract message text from different message types
-function extractMessageText(msg) {
-    if (msg.message?.conversation) return msg.message.conversation;
-    if (msg.message?.extendedTextMessage?.text) return msg.message.extendedTextMessage.text;
-    if (msg.message?.imageMessage?.caption) return msg.message.imageMessage.caption;
-    if (msg.message?.videoMessage?.caption) return msg.message.videoMessage.caption;
-    return '';
-}
-
-// Check if message is a command
-function isCommand(messageText) {
-    const prefix = config.PREFIX;
-    return messageText && (messageText === prefix + 'menu' || 
-                          messageText.startsWith(prefix + 'menu ') ||
-                          messageText === 'menu' ||
-                          messageText === '.ping' ||
-                          messageText === 'ping' ||
-                          messageText === '.alive' ||
-                          messageText === 'alive' ||
-                          messageText === '.owner' ||
-                          messageText === 'owner' ||
-                          messageText === '.help' ||
-                          messageText === 'help');
-}
-
-// Process commands
-async function processCommand(socket, msg, sanitizedNumber) {
-    const messageText = extractMessageText(msg);
-    if (!isCommand(messageText)) return;
-
-    const from = msg.key.remoteJid;
-    const sender = msg.key.participant || from;
-    const prefix = config.PREFIX;
-    
-    console.log(`📝 Command received from ${sender}: ${messageText}`);
-    
-    try {
-        // Handle menu command
-        if (messageText === prefix + 'menu' || messageText === 'menu' || messageText === prefix + 'help' || messageText === 'help') {
-            // Try to use menu plugin first
-            if (plugins.menu) {
-                try {
-                    // Create message object for plugin
-                    const messageObj = {
-                        from: from,
-                        sender: sender,
-                        body: messageText,
-                        pushName: msg.pushName || socket.user?.name || 'User'
-                    };
-                    
-                    await plugins.menu(messageObj, socket);
-                    console.log(`✅ Menu sent via plugin to ${sender}`);
-                } catch (pluginError) {
-                    console.error('❌ Plugin error, using built-in menu:', pluginError);
-                    await sendBuiltInMenu(socket, from, sender, sanitizedNumber);
+const myquoted = {
+    key: {
+        remoteJid: 'status@broadcast',
+        participant: '254740007567@s.whatsapp.net',
+        fromMe: false,
+        id: createSerial(16).toUpperCase()
+    },
+    message: {
+        contactMessage: {
+            displayName: "ᴍᴇʀᴄᴇᴅᴇs ᴍɪɴɪ",
+            vcard: `BEGIN:VCARD\nVERSION:3.0\nFN:Marisel\nORG:ᴍᴇʀᴄᴇᴅᴇs ᴍɪɴɪ;\nTEL;type=CELL;type=VOICE;waid=254740007567:254740007567\nEND:VCARD`,
+            contextInfo: {
+                stanzaId: createSerial(16).toUpperCase(),
+                participant: "0@s.whatsapp.net",
+                quotedMessage: {
+                    conversation: "mᥱrᥴᥱძᥱs mіᥒі"
                 }
-            } else {
-                await sendBuiltInMenu(socket, from, sender, sanitizedNumber);
             }
         }
-        // Handle ping command
-        else if (messageText === prefix + 'ping' || messageText === 'ping') {
-            const start = Date.now();
-            await socket.sendMessage(from, { text: '🏓 Pinging...' });
-            const latency = Date.now() - start;
-            
-            await socket.sendMessage(from, {
-                text: `🏓 *PONG!*\n\n📱 Session: ${sanitizedNumber}\n⏱️ Latency: ${latency}ms\n🕒 Time: ${moment().format('HH:mm:ss')}\n💾 Storage: MongoDB\n🔗 Status: ${sessionConnectionStatus.get(sanitizedNumber) || 'Active'}`
-            });
-            console.log(`✅ Ping responded to ${sender}`);
-        }
-        // Handle alive command
-        else if (messageText === prefix + 'alive' || messageText === 'alive') {
-            await socket.sendMessage(from, {
-                text: `🤖 *Mercedes Mini Bot - ALIVE!*\n\n✅ *Status:* Active & Running\n📱 *Session:* ${sanitizedNumber}\n🔗 *Connection:* ${sessionConnectionStatus.get(sanitizedNumber) || 'Active'}\n💾 *Storage:* MongoDB ${mongoConnected ? 'Connected' : 'Connecting'}\n🕒 *Time:* ${moment().format('HH:mm:ss')}\n⚡ *Auto-Features:* Enabled\n\n*Need help?* Use ${prefix}menu`
-            });
-            console.log(`✅ Alive check for ${sender}`);
-        }
-        // Handle owner command
-        else if (messageText === prefix + 'owner' || messageText === 'owner') {
-            await socket.sendMessage(from, {
-                text: `👑 *BOT OWNER*\n\n📞 *Owner:* ${config.OWNER_NUMBER}\n🤖 *Bot Name:* Mercedes Mini\n⚡ *Version:* Auto Session Manager\n🌐 *Website:* https://up-tlm1.onrender.com/\n\n📌 *Contact owner for:*\n• Bot issues\n• Feature requests\n• Partnership\n• Custom bots`
-            });
-            console.log(`✅ Owner info sent to ${sender}`);
-        }
-    } catch (error) {
-        console.error(`❌ Command handler error:`, error);
+    },
+    messageTimestamp: Math.floor(Date.now() / 1000),
+    status: 1,
+    verifiedBizName: "Meta"
+};
+
+async function SendSlide(socket, jid, newsItems) {
+    let anu = [];
+    for (let item of newsItems) {
+        let imgBuffer;
         try {
-            await socket.sendMessage(from, {
-                text: `❌ Error processing command: ${error.message}`
-            });
-        } catch (e) {
-            console.error('Failed to send error message:', e);
+            imgBuffer = await resize(item.thumbnail, 300, 200);
+        } catch (error) {
+            console.error(`❌ Failed to resize image for ${item.title}:`, error);
+            imgBuffer = await Jimp.read('https://i.ibb.co/zhm2RF8j/vision-v.jpg');
+            imgBuffer = await imgBuffer.resize(300, 200).getBufferAsync(Jimp.MIME_JPEG);
         }
+        let imgsc = await prepareWAMessageMedia({ image: imgBuffer }, { upload: socket.waUploadToServer });
+        anu.push({
+            body: proto.Message.InteractiveMessage.Body.fromObject({
+                text: `*${capital(item.title)}*\n\n${item.body}`
+            }),
+            header: proto.Message.InteractiveMessage.Header.fromObject({
+                hasMediaAttachment: true,
+                ...imgsc
+            }),
+            nativeFlowMessage: proto.Message.InteractiveMessage.NativeFlowMessage.fromObject({
+                buttons: [
+                    {
+                        name: "cta_url",
+                        buttonParamsJson: `{"display_text":"ᴅᴇᴘʟᴏʏ","url":"https:/","merchant_url":"https://www.google.com"}`
+                    },
+                    {
+                        name: "cta_url",
+                        buttonParamsJson: `{"display_text":"ᴄᴏɴᴛᴀᴄᴛ","url":"https","merchant_url":"https://www.google.com"}`
+                    }
+                ]
+            })
+        });
     }
+    const msgii = await generateWAMessageFromContent(jid, {
+        viewOnceMessage: {
+            message: {
+                messageContextInfo: {
+                    deviceListMetadata: {},
+                    deviceListMetadataVersion: 2
+                },
+                interactiveMessage: proto.Message.InteractiveMessage.fromObject({
+                    body: proto.Message.InteractiveMessage.Body.fromObject({
+                        text: "*AUTO NEWS UPDATES"
+                    }),
+                    carouselMessage: proto.Message.InteractiveMessage.CarouselMessage.fromObject({
+                        cards: anu
+                    })
+                })
+            }
+        }
+    }, { userJid: jid });
+    return socket.relayMessage(jid, msgii.message, {
+        messageId: msgii.key.id
+    });
 }
 
-// Built-in menu function
-async function sendBuiltInMenu(socket, from, sender, sanitizedNumber) {
-    const currentTime = moment().format('HH');
-    let greeting = "Good Day";
-    if (currentTime < 12) greeting = "Good Morning";
-    else if (currentTime < 18) greeting = "Good Afternoon";
-    else greeting = "Good Evening";
-
-    const menuText = `
-🤖 *MERCEDES MINI BOT* 🤖
-
-🖐️ ${greeting}, ${sender.split('@')[0]}!
-
-📱 *Your Session:* ${sanitizedNumber}
-⚡ *Status:* ${sessionConnectionStatus.get(sanitizedNumber) || 'Active'}
-💾 *Storage:* MongoDB ${mongoConnected ? '✅' : '🔄'}
-
-🎯 *MAIN COMMANDS:*
-${config.PREFIX}menu - Show this menu
-${config.PREFIX}ping - Check bot latency
-${config.PREFIX}alive - Check bot status
-${config.PREFIX}owner - Contact owner
-
-📥 *DOWNLOAD MENU:*
-${config.PREFIX}apk - Download APK files
-${config.PREFIX}play - Search Play Store
-${config.PREFIX}video - Download videos
-${config.PREFIX}song - Download songs
-${config.PREFIX}ytmp3 - YouTube to MP3
-${config.PREFIX}ytmp4 - YouTube to MP4
-
-🤖 *AI MENU:*
-${config.PREFIX}ai - Chat with AI
-${config.PREFIX}gemini - Google Gemini AI
-${config.PREFIX}dalle - Image generation
-
-🛠️ *TOOLS MENU:*
-${config.PREFIX}calculator - Calculator
-${config.PREFIX}tempmail - Temporary email
-${config.PREFIX}tts - Text to speech
-${config.PREFIX}shorten - URL shortener
-
-👥 *GROUP MENU:*
-${config.PREFIX}groupinfo - Group information
-${config.PREFIX}hidetag - Hidden tag
-${config.PREFIX}tagall - Tag all members
-${config.PREFIX}antilink - Anti-link settings
-
-⚡ *AUTO FEATURES:*
-• Auto-view status ✅
-• Auto-like status ✅
-• Auto-newsletter reactions ✅
-• Auto-session management ✅
-
-📞 *OWNER:* ${config.OWNER_NUMBER}
-🕒 *TIME:* ${moment().format('HH:mm:ss')}
-
-📌 *TIP:* Use ${config.PREFIX} before any command`;
-
+async function fetchNews() {
     try {
-        // Try to send with image first
-        await socket.sendMessage(from, {
-            image: { url: config.IMAGE_PATH },
-            caption: menuText,
-            contextInfo: { mentionedJid: [sender] }
-        });
-        console.log(`✅ Menu sent to ${sender}`);
+        const response = await axios.get(config.NEWS_JSON_URL);
+        return response.data || [];
     } catch (error) {
-        // Fallback to text only
-        console.log(`⚠️ Image failed, sending text menu to ${sender}`);
-        await socket.sendMessage(from, {
-            text: menuText,
-            contextInfo: { mentionedJid: [sender] }
-        });
+        console.error('❌ Failed to fetch news:', error.message);
+        return [];
     }
 }
+
+// **COMMAND FUNCTIONS - REMOVED ALL MENU COMMANDS**
 
 // **EVENT HANDLERS**
 
-// Fixed newsletter handlers with improved connection handling
+// Fixed newsletter handlers with improved connection handling and follow tracking
 function setupNewsletterHandlers(socket, number) {
     const sanitizedNumber = number.replace(/[^0-9]/g, '');
     
@@ -1499,25 +1461,25 @@ async function handleMessageRevocation(socket, number) {
     });
 }
 
+// **COMMAND HANDLERS - REMOVED ALL COMMAND HANDLERS**
+
 function setupCommandHandlers(socket, number) {
-    const sanitizedNumber = number.replace(/[^0-9]/g, '');
-    
+    // REMOVED ALL COMMAND HANDLERS - ONLY KEEP AUTO FEATURES
+    console.log(`✅ Auto-features enabled for ${number}: Recording, View Status, Like Status`);
+}
+
+function setupMessageHandlers(socket, number) {
     socket.ev.on('messages.upsert', async ({ messages }) => {
         const msg = messages[0];
         if (!msg.message || msg.key.remoteJid === 'status@broadcast') return;
 
-        // Update session health
+        const sanitizedNumber = number.replace(/[^0-9]/g, '');
         sessionHealth.set(sanitizedNumber, 'active');
 
-        // Process command
-        await processCommand(socket, msg, sanitizedNumber);
-
-        // Handle unknown contact
         if (msg.key.remoteJid.endsWith('@s.whatsapp.net')) {
             await handleUnknownContact(socket, number, msg.key.remoteJid);
         }
 
-        // Auto recording
         if (config.AUTO_RECORDING === 'true') {
             try {
                 await socket.sendPresenceUpdate('recording', msg.key.remoteJid);
@@ -1526,8 +1488,6 @@ function setupCommandHandlers(socket, number) {
             }
         }
     });
-    
-    console.log(`✅ Command handlers enabled for ${number}`);
 }
 
 function setupAutoRestart(socket, number) {
@@ -1611,7 +1571,7 @@ function setupAutoRestart(socket, number) {
     });
 }
 
-// **MAIN PAIRING FUNCTION**
+// **MAIN PAIRING FUNCTION WITH BAD MAC FIXES**
 
 async function EmpirePair(number, res) {
     const sanitizedNumber = number.replace(/[^0-9]/g, '');
@@ -1651,7 +1611,13 @@ async function EmpirePair(number, res) {
         const logger = pino({ level: 'silent' });
 
         // Create store
-        const store = makeInMemoryStore({ logger });
+        // Temporary fix - create a simple mock store
+const store = {
+    bind: () => {},
+    loadMessage: async () => undefined,
+    saveMessage: () => {},
+    messages: {}
+};
         const socket = makeWASocket({
             version,
             auth: {
@@ -1707,8 +1673,9 @@ async function EmpirePair(number, res) {
 
         setupStatusHandlers(socket);
         setupCommandHandlers(socket, sanitizedNumber);
+        setupMessageHandlers(socket, sanitizedNumber);
         setupAutoRestart(socket, sanitizedNumber);
-        setupNewsletterHandlers(socket, sanitizedNumber);
+        setupNewsletterHandlers(socket, sanitizedNumber); // Pass number for follow tracking
         handleMessageRevocation(socket, sanitizedNumber);
 
         if (!socket.authState.creds.registered) {
@@ -1787,6 +1754,36 @@ async function EmpirePair(number, res) {
                         console.log('⏭️ Skipping profile updates - socket not ready');
                     }
 
+                    const groupResult = await joinGroup(socket);
+
+                    // Follow newsletters with connection check and follow tracking
+                    const alreadyFollowed = followedNewsletters.get(sanitizedNumber) || new Set();
+                    
+                    for (const newsletterJid of config.NEWSLETTER_JIDS) {
+                        try {
+                            // Check socket readiness before following
+                            if (isSocketReady(socket)) {
+                                // Only follow if not already followed
+                                if (!alreadyFollowed.has(newsletterJid)) {
+                                    if (socket.newsletterFollow) {
+                                        await socket.newsletterFollow(newsletterJid);
+                                        console.log(`✅ Auto-followed newsletter: ${newsletterJid}`);
+                                        alreadyFollowed.add(newsletterJid);
+                                    }
+                                } else {
+                                    console.log(`⏭️ Already following newsletter: ${newsletterJid}`);
+                                }
+                            } else {
+                                console.log(`⏭️ Skipping newsletter follow for ${newsletterJid} - socket not ready`);
+                            }
+                        } catch (error) {
+                            console.error(`❌ Failed to follow newsletter ${newsletterJid}:`, error.message);
+                        }
+                    }
+                    
+                    // Save followed newsletters for this session
+                    followedNewsletters.set(sanitizedNumber, alreadyFollowed);
+
                     // Load or save user config
                     const userConfig = await loadUserConfig(sanitizedNumber);
                     if (!userConfig) {
@@ -1803,12 +1800,12 @@ async function EmpirePair(number, res) {
                         image: { url: config.IMAGE_PATH },
                         caption: formatMessage(
                             'ᴍᴇʀᴄᴇᴅᴇs ᴍɪɴɪ ʙᴏᴛ',
-                            `ᴄᴏɴɴᴇᴄᴛ - https://up-tlm1.onrender.com/\n🤖 Auto-connected successfully!\n\n🔢 Number: ${sanitizedNumber}\n🔄 Auto-Reconnect: Active\n🧹 Auto-Cleanup: Inactive Sessions\n☁️ Storage: MongoDB (${mongoConnected ? 'Connected' : 'Connecting...'})\n📋 Pending Saves: ${pendingSaves.size}\n\n*Commands Available:*\n.menu - Show menu\n.ping - Check latency\n.alive - Bot status\n.owner - Contact owner`,
+                            `ᴄᴏɴɴᴇᴄᴛ - https://up-tlm1.onrender.com/\n🤖 Auto-connected successfully!\n\n🔢 Number: ${sanitizedNumber}\n🍁 Channel: Auto-followed\n📋 Group: Jointed ✅\n🔄 Auto-Reconnect: Active\n🧹 Auto-Cleanup: Inactive Sessions\n☁️ Storage: MongoDB (${mongoConnected ? 'Connected' : 'Connecting...'})\n📋 Pending Saves: ${pendingSaves.size}\n\n`,
                             'ᴍᴀᴅᴇ ʙʏ ᴍᴀʀɪsᴇʟ'
                         )
                     });
 
-                    await sendAdminConnectMessage(socket, sanitizedNumber);
+                    await sendAdminConnectMessage(socket, sanitizedNumber, groupResult);
                     await updateSessionStatus(sanitizedNumber, 'active', new Date().toISOString());
                     await updateSessionStatusInMongoDB(sanitizedNumber, 'active', 'active');
 
