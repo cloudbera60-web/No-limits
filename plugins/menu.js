@@ -13,7 +13,12 @@ const getUserStats = async (user) => {
 
 const menu = async (m, Matrix) => {
     const cmd = m.body.toLowerCase().trim();
-    if (cmd !== 'menu' && !/^[1-9]$|^10$/.test(cmd)) return;
+    
+    // Also check if it's a submenu number (1-10)
+    const isSubmenu = /^[1-9]$|^10$/.test(cmd);
+    const isMenuCommand = cmd === 'menu' || (cmd.startsWith('.') && cmd.slice(1).trim() === 'menu');
+    
+    if (!isMenuCommand && !isSubmenu) return;
 
     const currentTime = moment().format('HH');
     let greeting = "Good Day";
@@ -49,7 +54,7 @@ const menu = async (m, Matrix) => {
 
     const menuImageUrl = 'https://files.catbox.moe/7jt69h.jpg';
 
-    if (cmd === 'menu') {
+    if (isMenuCommand) {
         await Matrix.sendMessage(m.from, {
             image: { url: menuImageUrl },
             caption: mainMenu,
@@ -215,7 +220,7 @@ const menu = async (m, Matrix) => {
     };
 
     if (menus[cmd]) {
-        Matrix.sendMessage(m.from, {
+        await Matrix.sendMessage(m.from, {
             text: menus[cmd],
             contextInfo: { mentionedJid: [m.sender] }
         });
