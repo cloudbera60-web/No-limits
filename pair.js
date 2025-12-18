@@ -47,8 +47,9 @@ if (fs.existsSync('2nd_dev_config.env')) require('dotenv').config({ path: './2nd
 
 const { sms } = require("./msg");
 
-// FIXED BAILEYS IMPORT - Use this exact code
-const baileysImport = require('@whiskeysockets/baileys');
+// Use a top-level await if your environment supports it
+const baileys = await import('@whiskeysockets/baileys');
+// Or wrap it in an async function
 const {
     default: makeWASocket,
     useMultiFileAuthState,
