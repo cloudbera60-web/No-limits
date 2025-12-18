@@ -944,6 +944,41 @@ async function autoRestoreAllSessions() {
 
                 // Save to local for running bot
                 await saveSessionLocally(number, session.sessionData);
+async function autoRestoreAllSessions() {
+    try {
+        if (!mongoConnected) {
+            console.log('⚠️ MongoDB not connected, skipping auto-restore');
+            return { restored: [], failed: [] };
+        }
+
+        console.log('🔄 Starting auto-restore process from MongoDB...');
+        const restoredSessions = [];
+        const failedSessions = [];
+
+        // Get all active sessions from MongoDB
+        const mongoSessions = await getAllActiveSessionsFromMongoDB();
+
+        for (const session of mongoSessions) {
+            const number = session.number;
+
+            if (activeSockets.has(number) || restoringNumbers.has(number)) {
+                continue;
+            }
+
+            try {
+                console.log(`🔄 Restoring session from MongoDB: ${number}`);
+                restoringNumbers.add(number);
+
+                // Validate session data before restoring
+                if (!validateSessionData(session.sessionData)) {
+                    console.warn(`⚠️ Invalid session data in MongoDB, clearing: ${number}`);
+                    await handleBadMacError(number);
+                    failedSessions.push(number);
+                    continue;
+                }
+
+                // Save to local for running bot
+                await saveSessionLocally(number, session.sessionData);
 
                 const mockRes = {
                     headersSent: false,
@@ -963,12 +998,12 @@ async function autoRestoreAllSessions() {
                 // Check for Bad MAC error
                 if (error.message?.includes('MAC') || error.message?.includes('decrypt')) {
                     await handleBadMacError(number);
-                else {
+                } else {
                     // Update status in MongoDB
                     await updateSessionStatusInMongoDB(number, 'failed', 'disconnected');
                 }
-            }
-        }
+            } // Closing brace for catch block
+        } // Closing brace for for loop
 
         console.log(`✅ Auto-restore completed: ${restoredSessions.length} restored, ${failedSessions.length} failed`);
 
@@ -985,7 +1020,7 @@ async function autoRestoreAllSessions() {
         console.error('❌ Auto-restore failed:', error);
         return { restored: [], failed: [] };
     }
-}
+        }
 
 async function updateSessionStatus(number, status, timestamp, extra = {}) {
     try {
