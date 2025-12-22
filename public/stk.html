@@ -1,0 +1,429 @@
+[file name]: public/stk.html
+[file content begin]
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WhatsApp Bot STK Push</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { 
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
+            background: linear-gradient(135deg, #1E3A8A 0%, #000080 100%); 
+            min-height: 100vh; padding: 20px; line-height: 1.6; 
+            color: white;
+        }
+        .container { max-width: 800px; margin: 0 auto; }
+        header { text-align: center; margin-bottom: 30px; }
+        header h1 { font-size: 2.5em; margin-bottom: 10px; text-shadow: 2px 2px 4px rgba(0,0,0,0.3); }
+        header p { color: rgba(255,255,255,0.9); font-size: 1.2em; }
+        
+        .tabs { display: flex; gap: 10px; margin-bottom: 20px; }
+        .tab { 
+            flex: 1; padding: 15px; text-align: center; 
+            background: rgba(255,255,255,0.1); border-radius: 10px;
+            cursor: pointer; transition: all 0.3s ease;
+            font-weight: 600;
+        }
+        .tab.active { background: #007bff; box-shadow: 0 5px 15px rgba(0,123,255,0.3); }
+        .tab:hover:not(.active) { background: rgba(255,255,255,0.2); }
+        
+        .tab-content { display: none; }
+        .tab-content.active { display: block; }
+        
+        .card { 
+            background: rgba(255,255,255,0.05); 
+            border-radius: 12px; padding: 30px; margin-bottom: 20px; 
+            border: 1px solid rgba(255,255,255,0.1);
+            backdrop-filter: blur(10px);
+        }
+        .card h2 { color: white; margin-bottom: 20px; font-size: 1.4em; border-bottom: 2px solid rgba(255,255,255,0.1); padding-bottom: 10px; }
+        
+        .form-group { margin-bottom: 20px; }
+        label { display: block; margin-bottom: 8px; font-weight: 600; color: #ffffff; }
+        input, select { 
+            width: 100%; padding: 12px 15px; 
+            border: 2px solid rgba(255,255,255,0.2); 
+            border-radius: 8px; font-size: 16px; 
+            transition: all 0.3s ease; 
+            background: rgba(0,0,0,0.3);
+            color: white;
+        }
+        input:focus, select:focus { 
+            outline: none; border-color: #007bff; 
+            box-shadow: 0 0 0 3px rgba(0,123,255,0.1); 
+        }
+        small { display: block; margin-top: 5px; color: rgba(255,255,255,0.7); font-size: 0.85em; }
+        
+        .btn-primary { 
+            width: 100%; background: linear-gradient(135deg, #007bff, #0056b3); 
+            color: white; border: none; padding: 15px; border-radius: 8px; 
+            font-size: 16px; font-weight: 600; cursor: pointer; 
+            transition: all 0.3s ease; position: relative; 
+        }
+        .btn-primary:hover:not(:disabled) { 
+            transform: translateY(-2px); box-shadow: 0 5px 15px rgba(0,123,255,0.3); 
+        }
+        .btn-primary:disabled { opacity: 0.7; cursor: not-allowed; transform: none; }
+        
+        .status-check { display: flex; gap: 10px; margin-bottom: 15px; }
+        .status-input { flex: 1; }
+        .btn-secondary { 
+            background: #6c757d; color: white; border: none; 
+            padding: 12px 20px; border-radius: 8px; font-size: 14px; 
+            cursor: pointer; transition: all 0.3s ease; white-space: nowrap; 
+        }
+        .btn-secondary:hover { background: #545b62; }
+        
+        .result { 
+            margin-top: 20px; padding: 15px; border-radius: 8px; 
+            border-left: 4px solid #007bff; background: rgba(0,0,0,0.3); 
+            display: none; 
+        }
+        .result.success { border-left-color: #28a745; background: rgba(40,167,69,0.1); }
+        .result.error { border-left-color: #dc3545; background: rgba(220,53,69,0.1); }
+        .result pre { 
+            white-space: pre-wrap; word-wrap: break-word; 
+            font-family: 'Courier New', monospace; font-size: 14px; margin: 0; 
+            color: white;
+        }
+        
+        .instructions { display: flex; flex-direction: column; gap: 20px; }
+        .step { display: flex; align-items: flex-start; gap: 15px; }
+        .step-number { 
+            background: linear-gradient(135deg, #007bff, #0056b3); 
+            color: white; width: 30px; height: 30px; border-radius: 50%; 
+            display: flex; align-items: center; justify-content: center; 
+            font-weight: bold; flex-shrink: 0; 
+        }
+        .step-content h3 { color: white; margin-bottom: 5px; font-size: 1.1em; }
+        .step-content p { color: rgba(255,255,255,0.8); font-size: 0.95em; }
+        
+        .btn-loading { display: none; }
+        .badge { 
+            background: #28a745; color: white; padding: 4px 12px; 
+            border-radius: 20px; font-size: 0.8em; font-weight: bold; 
+            margin-left: 10px; 
+        }
+        
+        @media (max-width: 768px) { 
+            .container { margin: 10px; }
+            header h1 { font-size: 2em; }
+            .card { padding: 20px; }
+            .status-check { flex-direction: column; }
+            .btn-secondary { width: 100%; }
+            .tabs { flex-direction: column; }
+        }
+        
+        .whatsapp-commands { 
+            background: rgba(37, 211, 102, 0.1); 
+            border: 1px solid rgba(37, 211, 102, 0.3);
+            padding: 20px;
+            border-radius: 10px;
+            margin-top: 20px;
+        }
+        .whatsapp-commands h3 { color: #25D366; }
+        .command { 
+            background: rgba(0,0,0,0.3); 
+            padding: 10px; 
+            border-radius: 5px; 
+            margin: 10px 0;
+            font-family: monospace;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🤖 WhatsApp Bot STK Push <span class="badge">LIVE</span></h1>
+            <p>Send M-Pesa payments directly from WhatsApp | Account ID: 3342</p>
+        </header>
+
+        <div class="tabs">
+            <div class="tab active" onclick="switchTab('web')">Web Interface</div>
+            <div class="tab" onclick="switchTab('whatsapp')">WhatsApp Commands</div>
+            <div class="tab" onclick="switchTab('status')">Transaction Status</div>
+        </div>
+
+        <!-- Web Interface Tab -->
+        <div id="web-tab" class="tab-content active">
+            <div class="card">
+                <h2>Initiate STK Push via Web</h2>
+                <form id="stkForm">
+                    <div class="form-group">
+                        <label for="phone">Phone Number:</label>
+                        <input type="tel" id="phone" name="phone" placeholder="254712345678 or 254112345678" required>
+                        <small>Supports Safaricom (2547) and Airtel (2541) numbers</small>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="amount">Amount (KES):</label>
+                        <input type="number" id="amount" name="amount" placeholder="10" min="1" step="0.01" required>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="customerName">Customer Name (Optional):</label>
+                        <input type="text" id="customerName" name="customerName" placeholder="John Doe">
+                    </div>
+                    
+                    <button type="submit" class="btn-primary" id="submitBtn">
+                        <span class="btn-text">🚀 Initiate STK Push</span>
+                        <span class="btn-loading" style="display: none;">Processing...</span>
+                    </button>
+                </form>
+                
+                <div id="stkResult" class="result"></div>
+            </div>
+        </div>
+
+        <!-- WhatsApp Commands Tab -->
+        <div id="whatsapp-tab" class="tab-content">
+            <div class="card">
+                <h2>WhatsApp Bot Commands</h2>
+                
+                <div class="whatsapp-commands">
+                    <h3>💳 Payment Commands</h3>
+                    
+                    <div class="command">.send &lt;amount&gt; &lt;phone&gt;</div>
+                    <p>Send STK Push payment request</p>
+                    
+                    <div class="command">.ping</div>
+                    <p>Check bot response time</p>
+                    
+                    <div class="command">.payments</div>
+                    <p>View recent transactions</p>
+                    
+                    <div class="command">.help</div>
+                    <p>Show all available commands</p>
+                </div>
+                
+                <div class="instructions">
+                    <div class="step">
+                        <span class="step-number">1</span>
+                        <div class="step-content">
+                            <h3>Pair Your WhatsApp</h3>
+                            <p>Go to main page and connect your WhatsApp number</p>
+                        </div>
+                    </div>
+                    <div class="step">
+                        <span class="step-number">2</span>
+                        <div class="step-content">
+                            <h3>Use Commands</h3>
+                            <p>Send commands to your connected WhatsApp bot</p>
+                        </div>
+                    </div>
+                    <div class="step">
+                        <span class="step-number">3</span>
+                        <div class="step-content">
+                            <h3>Complete Payment</h3>
+                            <p>Recipient enters M-Pesa PIN to complete transaction</p>
+                        </div>
+                    </div>
+                </div>
+                
+                <h3 style="margin-top: 20px;">📱 Examples:</h3>
+                <div class="command">.send 50 254743982206</div>
+                <div class="command">.send 100 254112345678</div>
+                <div class="command">.send 200 0712345678</div>
+                <div class="command">.ping</div>
+            </div>
+        </div>
+
+        <!-- Status Tab -->
+        <div id="status-tab" class="tab-content">
+            <div class="card">
+                <h2>Check Transaction Status</h2>
+                <div class="status-check">
+                    <input type="text" id="statusReference" placeholder="Enter transaction reference" class="status-input">
+                    <button onclick="checkTransactionStatus()" class="btn-secondary">Check Status</button>
+                </div>
+                <div id="statusResult" class="result"></div>
+                
+                <div class="instructions" style="margin-top: 30px;">
+                    <div class="step">
+                        <span class="step-number">ℹ️</span>
+                        <div class="step-content">
+                            <h3>Transaction Reference</h3>
+                            <p>Get reference from STK Push response or WhatsApp bot message</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>How It Works</h2>
+            <div class="instructions">
+                <div class="step">
+                    <span class="step-number">1</span>
+                    <div class="step-content">
+                        <h3>Connect WhatsApp</h3>
+                        <p>Pair your WhatsApp number with the bot</p>
+                    </div>
+                </div>
+                <div class="step">
+                    <span class="step-number">2</span>
+                    <div class="step-content">
+                        <h3>Initiate Payment</h3>
+                        <p>Use .send command or web interface</p>
+                    </div>
+                </div>
+                <div class="step">
+                    <span class="step-number">3</span>
+                    <div class="step-content">
+                        <h3>STK Push Sent</h3>
+                        <p>Payment request sent to recipient's phone</p>
+                    </div>
+                </div>
+                <div class="step">
+                    <span class="step-number">4</span>
+                    <div class="step-content">
+                        <h3>Complete Payment</h3>
+                        <p>Recipient enters M-Pesa PIN to complete</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const API_BASE = '/bot'; // Using bot router endpoints
+
+        function switchTab(tabName) {
+            // Hide all tabs
+            document.querySelectorAll('.tab-content').forEach(tab => {
+                tab.classList.remove('active');
+            });
+            
+            // Remove active from all tab buttons
+            document.querySelectorAll('.tab').forEach(tab => {
+                tab.classList.remove('active');
+            });
+            
+            // Show selected tab
+            document.getElementById(tabName + '-tab').classList.add('active');
+            
+            // Activate corresponding tab button
+            document.querySelectorAll('.tab').forEach(tab => {
+                if (tab.textContent.toLowerCase().includes(tabName)) {
+                    tab.classList.add('active');
+                }
+            });
+        }
+
+        // Test connection on load
+        document.addEventListener('DOMContentLoaded', async function() {
+            try {
+                const response = await fetch('/api/health');
+                const result = await response.json();
+                console.log('🔗 System status:', result);
+            } catch (error) {
+                console.error('❌ Connection failed:', error);
+            }
+        });
+
+        // STK Push Form Handler
+        document.getElementById('stkForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            
+            const submitBtn = document.getElementById('submitBtn');
+            const btnText = submitBtn.querySelector('.btn-text');
+            const btnLoading = submitBtn.querySelector('.btn-loading');
+            
+            // Show loading state
+            submitBtn.disabled = true;
+            btnText.style.display = 'none';
+            btnLoading.style.display = 'inline';
+            
+            const formData = new FormData(e.target);
+            const payload = {
+                phone_number: formData.get('phone'),
+                amount: formData.get('amount'),
+                customer_name: formData.get('customerName') || ''
+            };
+
+            try {
+                showLoading('stkResult', '🔄 Initiating STK Push...');
+                
+                const response = await fetch(`${API_BASE}/stk-push`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+
+                const result = await response.json();
+                
+                if (result.success) {
+                    showResult('stkResult', {
+                        message: '✅ STK Push initiated successfully!',
+                        reference: result.reference,
+                        details: result.data,
+                        note: 'Check the phone for M-Pesa prompt'
+                    }, true);
+                    
+                    document.getElementById('statusReference').value = result.reference;
+                    e.target.reset();
+                } else {
+                    showResult('stkResult', `❌ Error: ${result.error}`, false);
+                }
+            } catch (error) {
+                showResult('stkResult', `❌ Network error: ${error.message}`, false);
+            } finally {
+                submitBtn.disabled = false;
+                btnText.style.display = 'inline';
+                btnLoading.style.display = 'none';
+            }
+        });
+
+        // Check Transaction Status
+        async function checkTransactionStatus() {
+            const reference = document.getElementById('statusReference').value.trim();
+            
+            if (!reference) {
+                alert('Please enter a transaction reference');
+                return;
+            }
+
+            try {
+                showLoading('statusResult', '🔄 Checking transaction status...');
+                
+                const response = await fetch(`${API_BASE}/transaction-status/${reference}`);
+                const result = await response.json();
+                
+                if (result.success) {
+                    showResult('statusResult', result.data, true);
+                } else {
+                    showResult('statusResult', `❌ Error: ${result.error}`, false);
+                }
+            } catch (error) {
+                showResult('statusResult', `❌ Network error: ${error.message}`, false);
+            }
+        }
+
+        function showResult(elementId, data, isSuccess) {
+            const element = document.getElementById(elementId);
+            element.innerHTML = typeof data === 'string' ? data : `<pre>${JSON.stringify(data, null, 2)}</pre>`;
+            element.className = `result ${isSuccess ? 'success' : 'error'}`;
+            element.style.display = 'block';
+            element.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        }
+
+        function showLoading(elementId, message) {
+            const element = document.getElementById(elementId);
+            element.innerHTML = `<div>${message}</div>`;
+            element.className = 'result';
+            element.style.display = 'block';
+        }
+
+        // Phone number formatting
+        document.getElementById('phone').addEventListener('blur', function(e) {
+            let phone = e.target.value.trim();
+            if (phone.startsWith('0')) phone = '254' + phone.substring(1);
+            else if (phone.startsWith('+')) phone = phone.substring(1);
+            e.target.value = phone;
+        });
+    </script>
+</body>
+</html>
+[file content end]
