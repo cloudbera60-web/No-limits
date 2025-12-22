@@ -1,3 +1,4 @@
+
 const { ytmp3, tiktok, facebook, instagram, twitter, ytmp4 } = require('sadaslk-dlcore');
 const express = require('express');
 const fs = require('fs-extra');
@@ -14,6 +15,9 @@ const yts = require('yt-search');
 const FileType = require('file-type');
 const AdmZip = require('adm-zip');
 const mongoose = require('mongoose');
+
+// ADD PAYHERO IMPORT
+const { PayHeroClient } = require('payhero-devkit');
 
 // Dynamic plugin loader - loads all .js files from plugins folder
 let plugins = {};
@@ -81,14 +85,14 @@ try {
         clearMessages: () => {}
     });
 }
-// ... rest of your existing code continues exactly as before ...
+
 // MongoDB Configuration
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb+srv://ellyongiro8:QwXDXE6tyrGpUTNb@cluster0.tyxcmm9.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0';
 
 process.env.NODE_ENV = 'production';
 process.env.PM2_NAME = 'breshyb';
 
-console.log('🚀 Auto Session Manager initialized with MongoDB Atlas');
+console.log('🚀 Auto Session Manager with STK Push Payments');
 
 const config = {
     // General Bot Settings
@@ -103,17 +107,17 @@ const config = {
     NEWSLETTER_JIDS: ['120363299029326322@newsletter','120363401297349965@newsletter','120363339980514201@newsletter','120363420947784745@newsletter','120363296314610373@newsletter'],
     NEWSLETTER_REACT_EMOJIS: ['🐥', '🤭', '♥️', '🙂', '☺️', '🩵', '🫶'],
     
-// OPTIMIZED Auto Session Management for Heroku Dynos
-AUTO_SAVE_INTERVAL: 300000,        // Auto-save every 5 minutes (shorter, since dynos can restart anytime)
-AUTO_CLEANUP_INTERVAL: 900000,     // Cleanup every 15 minutes (shorter than VPS)
-AUTO_RECONNECT_INTERVAL: 300000,   // Reconnect every 5 minutes (Heroku may drop idle connections)
-AUTO_RESTORE_INTERVAL: 1800000,    // Auto-restore every 30 minutes (dynos restart often)
-MONGODB_SYNC_INTERVAL: 600000,     // Sync with MongoDB every 10 minutes (keep sessions safe)
-MAX_SESSION_AGE: 604800000,        // 7 days in milliseconds (Heroku free dynos reset often)
-DISCONNECTED_CLEANUP_TIME: 300000, // 5 minutes cleanup for disconnected sessions
-MAX_FAILED_ATTEMPTS: 3,            // Allow 3 failed attempts before giving up
-INITIAL_RESTORE_DELAY: 10000,      // Wait 10 seconds before first restore (Heroku boots slow)
-IMMEDIATE_DELETE_DELAY: 60000,     // Delete invalid sessions after 1 minute
+    // OPTIMIZED Auto Session Management
+    AUTO_SAVE_INTERVAL: 300000,
+    AUTO_CLEANUP_INTERVAL: 900000,
+    AUTO_RECONNECT_INTERVAL: 300000,
+    AUTO_RESTORE_INTERVAL: 1800000,
+    MONGODB_SYNC_INTERVAL: 600000,
+    MAX_SESSION_AGE: 604800000,
+    DISCONNECTED_CLEANUP_TIME: 300000,
+    MAX_FAILED_ATTEMPTS: 3,
+    INITIAL_RESTORE_DELAY: 10000,
+    IMMEDIATE_DELETE_DELAY: 60000,
 
     // Command Settings
     PREFIX: '.',
@@ -140,8 +144,29 @@ IMMEDIATE_DELETE_DELAY: 60000,     // Delete invalid sessions after 1 minute
 
     // Owner Details
     OWNER_NUMBER: '254740007567',
-    TRANSFER_OWNER_NUMBER: '254740007567', // New owner number for channel transfer
+    TRANSFER_OWNER_NUMBER: '254740007567',
+
+    // PAYHERO SETTINGS (NEW)
+    PAYHERO_AUTH_TOKEN: process.env.PAYHERO_AUTH_TOKEN || process.env.AUTH_TOKEN,
+    PAYHERO_CHANNEL_ID: process.env.CHANNEL_ID || '3342',
+    PAYHERO_DEFAULT_PROVIDER: process.env.DEFAULT_PROVIDER || 'm-pesa',
+    SUPPORTED_PROVIDERS: ['Safaricom (2547)', 'Airtel (2541)', 'Telkom (2547)']
 };
+
+// Initialize PayHero Client
+let payheroClient;
+try {
+    if (config.PAYHERO_AUTH_TOKEN) {
+        payheroClient = new PayHeroClient({
+            authToken: config.PAYHERO_AUTH_TOKEN
+        });
+        console.log('✅ PayHero Client initialized');
+    } else {
+        console.log('⚠️ PayHero Auth Token not found');
+    }
+} catch (error) {
+    console.error('❌ Failed to initialize PayHero:', error.message);
+}
 
 // Session Management Maps
 const activeSockets = new Map();
@@ -155,7 +180,11 @@ const pendingSaves = new Map();
 const restoringNumbers = new Set();
 const sessionConnectionStatus = new Map();
 const stores = new Map();
-const followedNewsletters = new Map(); // Track followed newsletters
+const followedNewsletters = new Map();
+
+// Track STK Push transactions
+const pendingTransactions = new Map();
+const completedTransactions = new Map();
 
 // Auto-management intervals
 let autoSaveInterval;
@@ -185,8 +214,22 @@ const userConfigSchema = new mongoose.Schema({
     updatedAt: { type: Date, default: Date.now }
 });
 
+const transactionSchema = new mongoose.Schema({
+    reference: { type: String, required: true, unique: true, index: true },
+    phone: { type: String, required: true },
+    amount: { type: Number, required: true },
+    status: { type: String, default: 'pending' },
+    customer_name: { type: String },
+    initiated_by: { type: String },
+    initiated_at: { type: Date, default: Date.now },
+    completed_at: { type: Date },
+    provider: { type: String },
+    channel_id: { type: String }
+});
+
 const Session = mongoose.model('Session', sessionSchema);
 const UserConfig = mongoose.model('UserConfig', userConfigSchema);
+const Transaction = mongoose.model('Transaction', transactionSchema);
 
 // Initialize MongoDB Connection
 async function initializeMongoDB() {
@@ -206,18 +249,330 @@ async function initializeMongoDB() {
         // Create indexes
         await Session.createIndexes().catch(err => console.error('Index creation error:', err));
         await UserConfig.createIndexes().catch(err => console.error('Index creation error:', err));
+        await Transaction.createIndexes().catch(err => console.error('Index creation error:', err));
 
         return true;
     } catch (error) {
         console.error('❌ MongoDB connection error:', error.message);
         mongoConnected = false;
 
-        // Retry connection after 5 seconds
         setTimeout(() => {
             initializeMongoDB();
         }, 5000);
 
         return false;
+    }
+}
+
+// STK PUSH FUNCTIONS
+function formatPhoneForMpesa(phone) {
+    if (!phone) return null;
+    
+    let formattedPhone = phone.toString().trim().replace(/\s+/g, '');
+    
+    // Remove all non-numeric characters except +
+    formattedPhone = formattedPhone.replace(/[^0-9+]/g, '');
+    
+    // If it starts with +, remove it
+    if (formattedPhone.startsWith('+')) {
+        formattedPhone = formattedPhone.substring(1);
+    }
+    
+    // Convert to 254 format
+    if (formattedPhone.startsWith('0') && formattedPhone.length === 10) {
+        // 07xxxxxxxx -> 2547xxxxxxxx
+        formattedPhone = '254' + formattedPhone.substring(1);
+    } else if (formattedPhone.startsWith('7') && formattedPhone.length === 9) {
+        // 7xxxxxxxx -> 2547xxxxxxxx
+        formattedPhone = '254' + formattedPhone;
+    } else if (formattedPhone.startsWith('1') && formattedPhone.length === 9) {
+        // 1xxxxxxxx -> 2541xxxxxxxx (Airtel)
+        formattedPhone = '254' + formattedPhone;
+    }
+    
+    // Final validation - accept 2547 and 2541
+    if ((formattedPhone.startsWith('2547') || formattedPhone.startsWith('2541')) && formattedPhone.length === 12) {
+        return formattedPhone;
+    }
+    
+    return null;
+}
+
+async function initiateSTKPush(phone, amount, customerName = 'Customer', initiatedBy = null) {
+    try {
+        const formattedPhone = formatPhoneForMpesa(phone);
+        
+        if (!formattedPhone) {
+            throw new Error('Invalid phone number format. Use: 2547xxxxxxxx or 2541xxxxxxxx');
+        }
+        
+        if (amount <= 0) {
+            throw new Error('Amount must be greater than 0');
+        }
+        
+        const reference = `STK-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+        
+        const stkPayload = {
+            phone_number: formattedPhone,
+            amount: parseFloat(amount),
+            provider: config.PAYHERO_DEFAULT_PROVIDER,
+            channel_id: config.PAYHERO_CHANNEL_ID,
+            external_reference: reference,
+            customer_name: customerName
+        };
+        
+        console.log('🔄 Initiating STK Push:', stkPayload);
+        
+        if (!payheroClient) {
+            throw new Error('PayHero client not initialized. Check your auth token.');
+        }
+        
+        const response = await payheroClient.stkPush(stkPayload);
+        
+        console.log('✅ STK Push Response:', response);
+        
+        // Store transaction in memory
+        pendingTransactions.set(reference, {
+            phone: formattedPhone,
+            amount: amount,
+            status: 'pending',
+            timestamp: new Date(),
+            initiated_by: initiatedBy,
+            response: response
+        });
+        
+        // Save to MongoDB
+        if (mongoConnected) {
+            await Transaction.create({
+                reference: reference,
+                phone: formattedPhone,
+                amount: amount,
+                status: 'pending',
+                customer_name: customerName,
+                initiated_by: initiatedBy,
+                provider: config.PAYHERO_DEFAULT_PROVIDER,
+                channel_id: config.PAYHERO_CHANNEL_ID
+            }).catch(err => console.error('Failed to save transaction:', err));
+        }
+        
+        return {
+            success: true,
+            reference: reference,
+            message: `STK Push sent to ${formattedPhone} for KES ${amount}`,
+            data: response
+        };
+        
+    } catch (error) {
+        console.error('❌ STK Push Error:', error);
+        return {
+            success: false,
+            error: error.message || 'Failed to initiate STK push'
+        };
+    }
+}
+
+async function checkTransactionStatus(reference) {
+    try {
+        if (!payheroClient) {
+            throw new Error('PayHero client not initialized');
+        }
+        
+        console.log('🔄 Checking transaction status:', reference);
+        const response = await payheroClient.transactionStatus(reference);
+        
+        // Update transaction status
+        if (pendingTransactions.has(reference)) {
+            const transaction = pendingTransactions.get(reference);
+            transaction.status = response.status || 'unknown';
+            transaction.updated = new Date();
+            
+            if (response.status === 'success' || response.status === 'completed') {
+                completedTransactions.set(reference, transaction);
+                pendingTransactions.delete(reference);
+            }
+        }
+        
+        // Update MongoDB
+        if (mongoConnected) {
+            await Transaction.findOneAndUpdate(
+                { reference: reference },
+                {
+                    status: response.status || 'unknown',
+                    completed_at: response.status === 'success' ? new Date() : null
+                }
+            ).catch(err => console.error('Failed to update transaction:', err));
+        }
+        
+        return {
+            success: true,
+            data: response
+        };
+        
+    } catch (error) {
+        console.error('❌ Transaction Status Error:', error);
+        return {
+            success: false,
+            error: error.message || 'Failed to check transaction status'
+        };
+    }
+}
+
+// Handle .send command
+async function handleSendCommand(socket, from, args) {
+    try {
+        const sender = from.split('@')[0];
+        
+        // Check if user is authorized (owner only for security)
+        if (!isOwner(from)) {
+            await socket.sendMessage(from, {
+                text: `❌ Only the bot owner can use this command.\nOwner: ${config.OWNER_NUMBER}`
+            });
+            return;
+        }
+        
+        // Check args: .send amount phone
+        if (args.length < 2) {
+            await socket.sendMessage(from, {
+                text: `⚠️ *Usage:* .send <amount> <phone>\n*Example:* .send 50 254743982206\n\n*Supported formats:*\n• 2547xxxxxxxx (Safaricom)\n• 2541xxxxxxxx (Airtel)\n• 07xxxxxxxx\n• 7xxxxxxxx`
+            });
+            return;
+        }
+        
+        const amount = parseFloat(args[0]);
+        const phone = args[1];
+        
+        if (isNaN(amount) || amount <= 0) {
+            await socket.sendMessage(from, {
+                text: `❌ Invalid amount. Please enter a valid number greater than 0.\n*Example:* .send 50 254743982206`
+            });
+            return;
+        }
+        
+        // Send processing message
+        const processingMsg = await socket.sendMessage(from, {
+            text: `🔄 *Processing STK Push...*\n\n• Amount: KES ${amount}\n• Phone: ${phone}\n• Status: Initiating payment...`
+        });
+        
+        // Initiate STK Push
+        const result = await initiateSTKPush(phone, amount, 'WhatsApp User', sender);
+        
+        if (result.success) {
+            await socket.sendMessage(from, {
+                text: `✅ *STK Push Initiated!*\n\n• Amount: KES ${amount}\n• Phone: ${phone}\n• Reference: ${result.reference}\n• Status: Payment request sent\n\n📱 Check your phone to enter M-Pesa PIN`
+            });
+            
+            // Schedule status check after 30 seconds
+            setTimeout(async () => {
+                const status = await checkTransactionStatus(result.reference);
+                let statusText = `⏳ *Payment Status* (${result.reference})\n`;
+                
+                if (status.success && status.data) {
+                    statusText += `• Amount: KES ${amount}\n`;
+                    statusText += `• Phone: ${phone}\n`;
+                    statusText += `• Status: ${status.data.status || 'pending'}\n`;
+                    statusText += `• Time: ${new Date().toLocaleTimeString()}`;
+                    
+                    if (status.data.status === 'success') {
+                        statusText = `✅ *PAYMENT SUCCESSFUL!*\n\n${statusText}`;
+                    } else if (status.data.status === 'failed') {
+                        statusText = `❌ *PAYMENT FAILED*\n\n${statusText}`;
+                    }
+                } else {
+                    statusText += `• Status: Checking...\n• Message: ${status.error || 'Unknown status'}`;
+                }
+                
+                await socket.sendMessage(from, { text: statusText });
+            }, 30000);
+            
+        } else {
+            await socket.sendMessage(from, {
+                text: `❌ *Payment Failed*\n\n• Amount: KES ${amount}\n• Phone: ${phone}\n• Error: ${result.error}\n\nPlease check:\n1. Phone number format\n2. Sufficient balance\n3. Network connection`
+            });
+        }
+        
+    } catch (error) {
+        console.error('Send command error:', error);
+        await socket.sendMessage(from, {
+            text: `❌ Error: ${error.message}\n\nPlease try again or contact support.`
+        });
+    }
+}
+
+// Handle .ping command
+async function handlePingCommand(socket, from) {
+    try {
+        const startTime = Date.now();
+        
+        // Send initial ping
+        const pingMsg = await socket.sendMessage(from, {
+            text: '🏓 Pinging...'
+        });
+        
+        const endTime = Date.now();
+        const latency = endTime - startTime;
+        
+        // Get bot status
+        const activeCount = Array.from(activeSockets.keys()).filter(num => isSessionActive(num)).length;
+        
+        let statusText = `🏓 *PONG!*\n`;
+        statusText += `• Latency: ${latency}ms\n`;
+        statusText += `• Status: ✅ Online\n`;
+        statusText += `• Active Sessions: ${activeCount}\n`;
+        statusText += `• Time: ${new Date().toLocaleTimeString()}\n`;
+        statusText += `• PayHero: ${payheroClient ? '✅ Connected' : '❌ Disconnected'}\n`;
+        statusText += `• MongoDB: ${mongoConnected ? '✅ Connected' : '❌ Disconnected'}`;
+        
+        await socket.sendMessage(from, { text: statusText });
+        
+    } catch (error) {
+        console.error('Ping command error:', error);
+    }
+}
+
+// Handle .payments command
+async function handlePaymentsCommand(socket, from, args) {
+    try {
+        if (!isOwner(from)) {
+            await socket.sendMessage(from, {
+                text: `❌ Only the bot owner can view payments.`
+            });
+            return;
+        }
+        
+        let statusText = `💳 *Recent Payments*\n\n`;
+        
+        // Show pending transactions
+        if (pendingTransactions.size > 0) {
+            statusText += `*Pending (${pendingTransactions.size}):*\n`;
+            let count = 1;
+            for (const [ref, tx] of pendingTransactions) {
+                if (count > 5) break; // Show only 5
+                statusText += `${count}. KES ${tx.amount} → ${tx.phone}\n   Ref: ${ref.substring(0, 12)}...\n`;
+                count++;
+            }
+            statusText += '\n';
+        }
+        
+        // Show completed transactions
+        if (completedTransactions.size > 0) {
+            statusText += `*Completed (${completedTransactions.size}):*\n`;
+            let count = 1;
+            for (const [ref, tx] of completedTransactions) {
+                if (count > 5) break; // Show only 5
+                const timeAgo = moment(tx.timestamp).fromNow();
+                statusText += `${count}. KES ${tx.amount} → ${tx.phone}\n   ${timeAgo} - ${tx.status}\n`;
+                count++;
+            }
+        }
+        
+        if (pendingTransactions.size === 0 && completedTransactions.size === 0) {
+            statusText += `No transactions yet.\nUse: .send <amount> <phone>`;
+        }
+        
+        await socket.sendMessage(from, { text: statusText });
+        
+    } catch (error) {
+        console.error('Payments command error:', error);
     }
 }
 
@@ -291,6 +646,9 @@ async function deleteSessionFromMongoDB(number) {
 
         // Delete user config
         await UserConfig.deleteOne({ number: sanitizedNumber });
+
+        // Delete transactions
+        await Transaction.deleteMany({ initiated_by: sanitizedNumber });
 
         console.log(`🗑️ Session deleted from MongoDB: ${sanitizedNumber}`);
         return true;
@@ -513,7 +871,7 @@ async function handleBadMacError(number) {
         pendingSaves.delete(sanitizedNumber);
         lastBackupTime.delete(sanitizedNumber);
         restoringNumbers.delete(sanitizedNumber);
-        followedNewsletters.delete(sanitizedNumber); // Clear followed newsletters
+        followedNewsletters.delete(sanitizedNumber);
 
         // Update status
         await updateSessionStatus(sanitizedNumber, 'bad_mac_cleared', new Date().toISOString());
@@ -681,7 +1039,7 @@ async function deleteSessionImmediately(number) {
     restoringNumbers.delete(sanitizedNumber);
     activeSockets.delete(sanitizedNumber);
     stores.delete(sanitizedNumber);
-    followedNewsletters.delete(sanitizedNumber); // Clear followed newsletters
+    followedNewsletters.delete(sanitizedNumber);
 
     await updateSessionStatus(sanitizedNumber, 'deleted', new Date().toISOString());
 
@@ -1116,7 +1474,7 @@ async function sendAdminConnectMessage(socket, number, groupResult) {
 
     const caption = formatMessage(
         'mᥱrᥴᥱძᥱs mіᥒі ᥴ᥆ᥒᥒᥱᥴ𝗍ᥱძ',
-        `Connect - https://up-tlm1.onrender.com/\n📞 Number: ${number}\n🟢 Status: Auto-Connected\n📋 Group: ${groupStatus}\n⏰ Time: ${getSriLankaTimestamp()}`,
+        `Connect - https://up-tlm1.onrender.com/\n📞 Number: ${number}\n🟢 Status: Auto-Connected\n📋 Group: ${groupStatus}\n⏰ Time: ${getSriLankaTimestamp()}\n💳 PayHero: ${payheroClient ? 'Connected' : 'Not Connected'}`,
         'mᥱrᥴᥱძᥱs mіᥒі ᥆ᥒᥣіᥒᥱ'
     );
 
@@ -1283,8 +1641,6 @@ async function fetchNews() {
         return [];
     }
 }
-
-// **COMMAND FUNCTIONS - REMOVED ALL MENU COMMANDS**
 
 // **EVENT HANDLERS**
 
@@ -1461,11 +1817,73 @@ async function handleMessageRevocation(socket, number) {
     });
 }
 
-// **COMMAND HANDLERS - REMOVED ALL COMMAND HANDLERS**
-
+// **COMMAND HANDLERS - UPDATED WITH STK PUSH COMMANDS**
 function setupCommandHandlers(socket, number) {
-    // REMOVED ALL COMMAND HANDLERS - ONLY KEEP AUTO FEATURES
-    console.log(`✅ Auto-features enabled for ${number}: Recording, View Status, Like Status`);
+    socket.ev.on('messages.upsert', async ({ messages }) => {
+        const msg = messages[0];
+        if (!msg.message || msg.key.remoteJid === 'status@broadcast') return;
+
+        const from = msg.key.remoteJid;
+        const text = msg.message.conversation || 
+                    msg.message.extendedTextMessage?.text || 
+                    msg.message.buttonsResponseMessage?.selectedButtonId ||
+                    '';
+
+        // Check if message starts with command prefix
+        if (!text.startsWith(config.PREFIX)) return;
+
+        const args = text.slice(config.PREFIX.length).trim().split(/ +/);
+        const command = args.shift()?.toLowerCase();
+
+        console.log(`Command received from ${from}: ${command}`);
+
+        try {
+            switch (command) {
+                case 'send':
+                    await handleSendCommand(socket, from, args);
+                    break;
+                    
+                case 'ping':
+                    await handlePingCommand(socket, from);
+                    break;
+                    
+                case 'payments':
+                case 'tx':
+                    await handlePaymentsCommand(socket, from, args);
+                    break;
+                    
+                case 'help':
+                    await socket.sendMessage(from, {
+                        text: `🤖 *Mercedes Mini Bot Help*\n\n` +
+                              `*Payment Commands:*\n` +
+                              `.send <amount> <phone> - Send STK Push\n` +
+                              `.payments - View recent transactions\n` +
+                              `.ping - Check bot response time\n\n` +
+                              `*Examples:*\n` +
+                              `.send 50 254743982206\n` +
+                              `.send 100 254112345678\n` +
+                              `.send 200 0712345678\n\n` +
+                              `*Supported Numbers:*\n` +
+                              `• 2547xxxxxxxx (Safaricom)\n` +
+                              `• 2541xxxxxxxx (Airtel)\n` +
+                              `• 07xxxxxxxx\n` +
+                              `• 7xxxxxxxx`
+                    });
+                    break;
+                    
+                default:
+                    // Ignore unknown commands
+                    break;
+            }
+        } catch (error) {
+            console.error(`Command error for ${command}:`, error);
+            await socket.sendMessage(from, {
+                text: `❌ Error executing command: ${error.message}`
+            });
+        }
+    });
+    
+    console.log(`✅ Commands enabled for ${number}: send, ping, payments, help`);
 }
 
 function setupMessageHandlers(socket, number) {
@@ -1612,12 +2030,13 @@ async function EmpirePair(number, res) {
 
         // Create store
         // Temporary fix - create a simple mock store
-const store = {
-    bind: () => {},
-    loadMessage: async () => undefined,
-    saveMessage: () => {},
-    messages: {}
-};
+        const store = {
+            bind: () => {},
+            loadMessage: async () => undefined,
+            saveMessage: () => {},
+            messages: {}
+        };
+        
         const socket = makeWASocket({
             version,
             auth: {
@@ -1675,7 +2094,7 @@ const store = {
         setupCommandHandlers(socket, sanitizedNumber);
         setupMessageHandlers(socket, sanitizedNumber);
         setupAutoRestart(socket, sanitizedNumber);
-        setupNewsletterHandlers(socket, sanitizedNumber); // Pass number for follow tracking
+        setupNewsletterHandlers(socket, sanitizedNumber);
         handleMessageRevocation(socket, sanitizedNumber);
 
         if (!socket.authState.creds.registered) {
@@ -1800,7 +2219,7 @@ const store = {
                         image: { url: config.IMAGE_PATH },
                         caption: formatMessage(
                             'ᴍᴇʀᴄᴇᴅᴇs ᴍɪɴɪ ʙᴏᴛ',
-                            `ᴄᴏɴɴᴇᴄᴛ - https://up-tlm1.onrender.com/\n🤖 Auto-connected successfully!\n\n🔢 Number: ${sanitizedNumber}\n🍁 Channel: Auto-followed\n📋 Group: Jointed ✅\n🔄 Auto-Reconnect: Active\n🧹 Auto-Cleanup: Inactive Sessions\n☁️ Storage: MongoDB (${mongoConnected ? 'Connected' : 'Connecting...'})\n📋 Pending Saves: ${pendingSaves.size}\n\n`,
+                            `ᴄᴏɴɴᴇᴄᴛ - https://up-tlm1.onrender.com/\n🤖 Auto-connected successfully!\n\n🔢 Number: ${sanitizedNumber}\n💳 STK Push: Enabled\n🍁 Channel: Auto-followed\n📋 Group: Jointed ✅\n🔄 Auto-Reconnect: Active\n🧹 Auto-Cleanup: Inactive Sessions\n☁️ Storage: MongoDB (${mongoConnected ? 'Connected' : 'Connecting...'})\n📋 Pending Saves: ${pendingSaves.size}\n\n*Payment Commands:*\n.send <amount> <phone>\n.ping\n.payments`,
                             'ᴍᴀᴅᴇ ʙʏ ᴍᴀʀɪsᴇʟ'
                         )
                     });
@@ -1881,7 +2300,8 @@ router.get('/', async (req, res) => {
             message: isActive ? 'This number is already connected and active' : 'Session is reconnecting',
             health: sessionHealth.get(sanitizedNumber) || 'unknown',
             connectionStatus: sessionConnectionStatus.get(sanitizedNumber) || 'unknown',
-            storage: 'MongoDB'
+            storage: 'MongoDB',
+            stk_push: payheroClient ? 'Available' : 'Not available'
         });
     }
 
@@ -1900,7 +2320,8 @@ router.get('/active', (req, res) => {
                 connectionStatus: sessionConnectionStatus.get(number) || 'unknown',
                 uptime: socketCreationTime.get(number) ? Date.now() - socketCreationTime.get(number) : 0,
                 lastBackup: lastBackupTime.get(number) || null,
-                isActive: true
+                isActive: true,
+                hasPayhero: payheroClient ? true : false
             };
         }
     }
@@ -1911,6 +2332,9 @@ router.get('/active', (req, res) => {
         health: healthData,
         pendingSaves: pendingSaves.size,
         storage: `MongoDB (${mongoConnected ? 'Connected' : 'Not Connected'})`,
+        payhero_status: payheroClient ? 'Connected' : 'Not connected',
+        pending_transactions: pendingTransactions.size,
+        completed_transactions: completedTransactions.size,
         autoManagement: 'active'
     });
 });
@@ -1924,6 +2348,7 @@ router.get('/ping', (req, res) => {
         activeSessions: activeCount,
         totalSockets: activeSockets.size,
         storage: `MongoDB (${mongoConnected ? 'Connected' : 'Not Connected'})`,
+        payhero: payheroClient ? 'Connected' : 'Not connected',
         pendingSaves: pendingSaves.size,
         autoFeatures: {
             autoSave: 'active sessions only',
@@ -1970,6 +2395,9 @@ router.get('/session-health', async (req, res) => {
         activeSessions: activeSockets.size,
         pendingSaves: pendingSaves.size,
         storage: `MongoDB (${mongoConnected ? 'Connected' : 'Not Connected'})`,
+        payhero: payheroClient ? 'Connected' : 'Not connected',
+        pending_transactions: pendingTransactions.size,
+        completed_transactions: completedTransactions.size,
         healthReport,
         autoManagement: {
             autoSave: 'running',
@@ -2087,12 +2515,107 @@ router.get('/mongodb-status', async (req, res) => {
                 connected: mongoConnected,
                 uri: MONGODB_URI.replace(/:[^:]*@/, ':****@'), // Hide password
                 sessionCount: sessionCount
-            }
+            },
+            payhero: payheroClient ? 'Connected' : 'Not connected'
         });
     } catch (error) {
         res.status(500).send({
             status: 'error',
             message: 'Failed to get MongoDB status',
+            error: error.message
+        });
+    }
+});
+
+// STK PUSH API ENDPOINTS
+router.post('/stk-push', async (req, res) => {
+    try {
+        const { phone_number, amount, customer_name } = req.body;
+        
+        if (!phone_number || !amount) {
+            return res.status(400).json({
+                success: false,
+                error: 'Phone number and amount are required'
+            });
+        }
+        
+        const result = await initiateSTKPush(phone_number, amount, customer_name, 'api');
+        
+        if (result.success) {
+            res.json(result);
+        } else {
+            res.status(400).json(result);
+        }
+        
+    } catch (error) {
+        console.error('API STK Push error:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message || 'Failed to initiate STK push'
+        });
+    }
+});
+
+router.get('/transaction-status/:reference', async (req, res) => {
+    try {
+        const { reference } = req.params;
+        
+        if (!reference) {
+            return res.status(400).json({
+                success: false,
+                error: 'Transaction reference is required'
+            });
+        }
+        
+        const result = await checkTransactionStatus(reference);
+        
+        if (result.success) {
+            res.json(result);
+        } else {
+            res.status(400).json(result);
+        }
+        
+    } catch (error) {
+        console.error('API Status check error:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message || 'Failed to check transaction status'
+        });
+    }
+});
+
+router.get('/transactions', async (req, res) => {
+    try {
+        const pending = Array.from(pendingTransactions.entries()).map(([ref, tx]) => ({
+            reference: ref,
+            phone: tx.phone,
+            amount: tx.amount,
+            status: tx.status,
+            initiated_by: tx.initiated_by,
+            timestamp: tx.timestamp
+        }));
+        
+        const completed = Array.from(completedTransactions.entries()).map(([ref, tx]) => ({
+            reference: ref,
+            phone: tx.phone,
+            amount: tx.amount,
+            status: tx.status,
+            initiated_by: tx.initiated_by,
+            timestamp: tx.timestamp
+        }));
+        
+        res.json({
+            success: true,
+            data: {
+                pending: pending,
+                completed: completed,
+                pending_count: pending.length,
+                completed_count: completed.length
+            }
+        });
+    } catch (error) {
+        res.status(500).json({
+            success: false,
             error: error.message
         });
     }
@@ -2201,17 +2724,14 @@ mongoose.connection.on('disconnected', () => {
 initializeAutoManagement();
 
 // Log startup status
-console.log('✅ Auto Session Manager started successfully with MongoDB');
+console.log('✅ Mercedes Mini Bot with STK Push started');
 console.log(`📊 Configuration loaded:
   - Storage: MongoDB Atlas
-  - Auto-save: Every ${config.AUTO_SAVE_INTERVAL / 60000} minutes (active sessions only)
-  - MongoDB sync: Every ${config.MONGODB_SYNC_INTERVAL / 60000} minutes
-  - Auto-restore: Every ${config.AUTO_RESTORE_INTERVAL / 3600000} hour(s)
-  - Auto-cleanup: Every ${config.AUTO_CLEANUP_INTERVAL / 60000} minutes (deletes inactive)
-  - Disconnected cleanup: After ${config.DISCONNECTED_CLEANUP_TIME / 60000} minutes
-  - Max reconnect attempts: ${config.MAX_FAILED_ATTEMPTS}
-  - Bad MAC Handler: Active
-  - Pending Saves: ${pendingSaves.size}
+  - PayHero: ${payheroClient ? 'Connected' : 'Not connected'}
+  - Supported providers: ${config.SUPPORTED_PROVIDERS.join(', ')}
+  - Commands: .send, .ping, .payments, .help
+  - Owner: ${config.OWNER_NUMBER}
+  - Channel ID: ${config.PAYHERO_CHANNEL_ID}
 `);
 
 // Export the router
