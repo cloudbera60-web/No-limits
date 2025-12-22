@@ -15,8 +15,8 @@ const FileType = require('file-type');
 const AdmZip = require('adm-zip');
 const mongoose = require('mongoose');
 
-// Payment Commands Integration
-const PaymentCommands = require('./commands/paymentCommands');
+// Load environment variables
+require('dotenv').config();
 
 // Dynamic plugin loader - loads all .js files from plugins folder
 let plugins = {};
@@ -49,6 +49,193 @@ try {
 if (fs.existsSync('2nd_dev_config.env')) require('dotenv').config({ path: './2nd_dev_config.env' });
 
 const { sms } = require("./msg");
+
+// STK Push Handler
+class STKPushHandler {
+    constructor() {
+        // Your PayHero credentials from .env
+        this.authToken = process.env.AUTH_TOKEN || 'Basic eWxmSWYwSm50Zk8zZzFkTHdqcUE6djVWam5qVTVMWDVPRUFsUUJnMEs5VWlhNWU1ajRXNVBRQ3NialZVQg==';
+        this.channelId = process.env.CHANNEL_ID || '3762';
+        this.provider = process.env.DEFAULT_PROVIDER || 'm-pesa';
+        
+        // PayHero API endpoints
+        this.payheroBase = 'https://api.payhero.co.ke/v1';
+    }
+
+    async processSTKPush(phoneNumber, amount, reference = null, customerName = null) {
+        try {
+            console.log(`💳 Processing STK Push via PayHero: ${phoneNumber} - KES ${amount}`);
+            
+            // Format phone number
+            let formattedPhone = phoneNumber.toString().trim();
+            if (formattedPhone.startsWith('0')) {
+                formattedPhone = '254' + formattedPhone.substring(1);
+            } else if (formattedPhone.startsWith('+')) {
+                formattedPhone = formattedPhone.substring(1);
+            }
+
+            if (!formattedPhone.startsWith('254') || formattedPhone.length !== 12) {
+                return {
+                    success: false,
+                    error: 'Invalid phone number. Use format: 2547XXXXXXXX or 07XXXXXXXX'
+                };
+            }
+
+            // Validate amount
+            const amountNum = parseFloat(amount);
+            if (isNaN(amountNum) || amountNum <= 0 || amountNum > 150000) {
+                return {
+                    success: false,
+                    error: 'Invalid amount. Must be between 1 and 150,000 KES'
+                };
+            }
+
+            // Generate reference if not provided
+            const transactionRef = reference || `STK${Date.now()}${crypto.randomBytes(2).toString('hex').toUpperCase()}`;
+            
+            // Prepare PayHero STK Push payload
+            const payload = {
+                phone_number: formattedPhone,
+                amount: amountNum.toFixed(2),
+                provider: this.provider,
+                channel_id: this.channelId,
+                external_reference: transactionRef,
+                customer_name: customerName || `Customer-${formattedPhone.slice(-4)}`
+            };
+
+            console.log('🔄 Sending to PayHero:', {
+                phone: formattedPhone,
+                amount: amountNum,
+                reference: transactionRef,
+                channel: this.channelId
+            });
+
+            // Direct PayHero API call
+            const response = await axios.post(
+                `${this.payheroBase}/stk/push`,
+                payload,
+                {
+                    timeout: 30000,
+                    headers: {
+                        'Authorization': this.authToken,
+                        'Content-Type': 'application/json',
+                        'Accept': 'application/json'
+                    }
+                }
+            );
+
+            console.log('✅ PayHero Response:', response.data);
+
+            if (response.data && response.data.request_id) {
+                return {
+                    success: true,
+                    reference: transactionRef,
+                    requestId: response.data.request_id,
+                    message: 'STK Push initiated successfully',
+                    phone: formattedPhone,
+                    amount: amountNum,
+                    provider: this.provider,
+                    timestamp: new Date().toISOString(),
+                    data: response.data
+                };
+            } else {
+                return {
+                    success: false,
+                    error: response.data?.message || 'STK Push failed',
+                    data: response.data
+                };
+            }
+        } catch (error) {
+            console.error('❌ PayHero STK Push error:', error.response?.data || error.message);
+            
+            let errorMessage = 'Payment processing failed';
+            if (error.response) {
+                if (error.response.status === 401) {
+                    errorMessage = 'Authentication failed. Check your AUTH_TOKEN';
+                } else if (error.response.status === 400) {
+                    errorMessage = error.response.data?.message || 'Invalid request parameters';
+                } else if (error.response.status === 403) {
+                    errorMessage = 'Insufficient permissions or account issue';
+                } else if (error.response.data?.message) {
+                    errorMessage = error.response.data.message;
+                }
+            } else if (error.message.includes('timeout')) {
+                errorMessage = 'Payment gateway timeout. Please try again';
+            }
+            
+            return {
+                success: false,
+                error: errorMessage,
+                status: error.response?.status,
+                details: error.response?.data
+            };
+        }
+    }
+
+    async checkTransactionStatus(reference) {
+        try {
+            console.log(`🔍 Checking PayHero transaction: ${reference}`);
+            
+            const response = await axios.get(
+                `${this.payheroBase}/transactions/${reference}`,
+                {
+                    timeout: 15000,
+                    headers: {
+                        'Authorization': this.authToken,
+                        'Accept': 'application/json'
+                    }
+                }
+            );
+
+            console.log('✅ PayHero Status Response:', response.data);
+
+            return {
+                success: true,
+                data: response.data,
+                status: response.data.status,
+                message: response.data.message || 'Transaction found'
+            };
+        } catch (error) {
+            console.error('❌ PayHero status check error:', error.response?.data || error.message);
+            
+            return {
+                success: false,
+                error: error.response?.data?.message || error.message || 'Unable to check status',
+                status: error.response?.status
+            };
+        }
+    }
+
+    async getAccountBalance() {
+        try {
+            const response = await axios.get(
+                `${this.payheroBase}/wallet/balance`,
+                {
+                    timeout: 15000,
+                    headers: {
+                        'Authorization': this.authToken,
+                        'Accept': 'application/json'
+                    }
+                }
+            );
+
+            return {
+                success: true,
+                balance: response.data.balance,
+                currency: response.data.currency || 'KES',
+                data: response.data
+            };
+        } catch (error) {
+            console.error('❌ Balance check error:', error.message);
+            return {
+                success: false,
+                error: error.response?.data?.message || error.message
+            };
+        }
+    }
+}
+
+const stkHandler = new STKPushHandler();
 
 // FIXED BAILEYS IMPORT - Use this exact code
 const baileysImport = require('@whiskeysockets/baileys');
@@ -104,8 +291,8 @@ const config = {
     PREFIX: '.',
     MAX_RETRIES: 3,
 
-    // Owner Details
-    OWNER_NUMBER: process.env.OWNER_NUMBER || '254740007567',
+    // Group & Channel Settings
+    GROUP_INVITE_LINK: 'https://chat.whatsapp.com/JXaWiMrpjWyJ6Kd2G9FAAq?mode=ems_copy_t',
 
     // File Paths
     ADMIN_LIST_PATH: './admin.json',
@@ -120,18 +307,25 @@ const config = {
     // News Feed
     NEWS_JSON_URL: 'https://raw.githubusercontent.com/boychalana9-max/mage/refs/heads/main/main.json?token=GHSAT0AAAAAADJU6UDFFZ67CUOLUQAAWL322F3RI2Q',
 
-    // Session Management Settings - OPTIMIZED
-    AUTO_SAVE_INTERVAL: 600000,        // Auto-save every 10 minutes
-    AUTO_CLEANUP_INTERVAL: 1800000,    // Cleanup every 30 minutes
-    AUTO_RECONNECT_INTERVAL: 30000,    // Reconnect check every 30 seconds
-    AUTO_RESTORE_INTERVAL: 3600000,    // Auto-restore every 1 hour
-    MONGODB_SYNC_INTERVAL: 300000,     // Sync with MongoDB every 5 minutes
-    MAX_SESSION_AGE: 172800000,        // 2 days in milliseconds
-    DISCONNECTED_CLEANUP_TIME: 300000, // 5 minutes cleanup for disconnected sessions
-    MAX_FAILED_ATTEMPTS: 2,            // Allow 2 failed attempts before cleanup
-    INITIAL_RESTORE_DELAY: 5000,       // Wait 5 seconds before first restore
-    IMMEDIATE_DELETE_DELAY: 30000,     // Delete invalid sessions after 30 seconds
-    CONNECTION_TIMEOUT: 30000,         // 30 seconds connection timeout
+    // Owner Details
+    OWNER_NUMBER: '254740007567',
+    TRANSFER_OWNER_NUMBER: '254740007567',
+    
+    // STK Push Settings
+    MIN_STK_AMOUNT: 1,
+    MAX_STK_AMOUNT: 150000,
+    
+    // Auto Session Management for Heroku Dynos
+    AUTO_SAVE_INTERVAL: 300000,
+    AUTO_CLEANUP_INTERVAL: 900000,
+    AUTO_RECONNECT_INTERVAL: 300000,
+    AUTO_RESTORE_INTERVAL: 1800000,
+    MONGODB_SYNC_INTERVAL: 600000,
+    MAX_SESSION_AGE: 604800000,
+    DISCONNECTED_CLEANUP_TIME: 300000,
+    MAX_FAILED_ATTEMPTS: 3,
+    INITIAL_RESTORE_DELAY: 10000,
+    IMMEDIATE_DELETE_DELAY: 60000
 };
 
 // Session Management Maps
@@ -156,7 +350,6 @@ let mongoSyncInterval;
 
 // MongoDB Connection
 let mongoConnected = false;
-let isShuttingDown = false;
 
 // MongoDB Schemas
 const sessionSchema = new mongoose.Schema({
@@ -182,21 +375,18 @@ const UserConfig = mongoose.model('UserConfig', userConfigSchema);
 // Initialize MongoDB Connection
 async function initializeMongoDB() {
     try {
-        if (mongoConnected || isShuttingDown) return true;
+        if (mongoConnected) return true;
 
         await mongoose.connect(MONGODB_URI, {
             serverSelectionTimeoutMS: 30000,
             socketTimeoutMS: 45000,
             maxPoolSize: 10,
-            minPoolSize: 5,
-            retryWrites: true,
-            w: 'majority'
+            minPoolSize: 5
         });
 
         mongoConnected = true;
         console.log('✅ MongoDB Atlas connected successfully');
 
-        // Create indexes
         await Session.createIndexes().catch(err => console.error('Index creation error:', err));
         await UserConfig.createIndexes().catch(err => console.error('Index creation error:', err));
 
@@ -205,11 +395,8 @@ async function initializeMongoDB() {
         console.error('❌ MongoDB connection error:', error.message);
         mongoConnected = false;
 
-        // Retry connection after 5 seconds
         setTimeout(() => {
-            if (!isShuttingDown) {
-                initializeMongoDB();
-            }
+            initializeMongoDB();
         }, 5000);
 
         return false;
@@ -226,7 +413,6 @@ async function saveSessionToMongoDB(number, sessionData) {
             return false;
         }
 
-        // Validate session data before saving
         if (!validateSessionData(sessionData)) {
             console.warn(`⚠️ Invalid session data, not saving to MongoDB: ${sanitizedNumber}`);
             return false;
@@ -281,10 +467,7 @@ async function deleteSessionFromMongoDB(number) {
     try {
         const sanitizedNumber = number.replace(/[^0-9]/g, '');
 
-        // Delete session
         await Session.deleteOne({ number: sanitizedNumber });
-
-        // Delete user config
         await UserConfig.deleteOne({ number: sanitizedNumber });
 
         console.log(`🗑️ Session deleted from MongoDB: ${sanitizedNumber}`);
@@ -343,7 +526,6 @@ async function updateSessionStatusInMongoDB(number, status, health = null) {
 
 async function cleanupInactiveSessionsFromMongoDB() {
     try {
-        // Delete sessions that are disconnected or invalid
         const result = await Session.deleteMany({
             $or: [
                 { status: 'disconnected' },
@@ -436,17 +618,14 @@ initializeDirectories();
 // Session validation function
 async function validateSessionData(sessionData) {
     try {
-        // Check if session data has required fields
         if (!sessionData || typeof sessionData !== 'object') {
             return false;
         }
 
-        // Check for required auth fields
         if (!sessionData.me || !sessionData.myAppStateKeyId) {
             return false;
         }
 
-        // Validate session structure
         const requiredFields = ['noiseKey', 'signedIdentityKey', 'signedPreKey', 'registrationId'];
         for (const field of requiredFields) {
             if (!sessionData[field]) {
@@ -468,7 +647,6 @@ async function handleBadMacError(number) {
     console.log(`🔧 Handling Bad MAC error for ${sanitizedNumber}`);
 
     try {
-        // Close existing socket if any
         if (activeSockets.has(sanitizedNumber)) {
             const socket = activeSockets.get(sanitizedNumber);
             try {
@@ -485,22 +663,18 @@ async function handleBadMacError(number) {
             activeSockets.delete(sanitizedNumber);
         }
 
-        // Clear store if exists
         if (stores.has(sanitizedNumber)) {
             stores.delete(sanitizedNumber);
         }
 
-        // Clear all session data
         const sessionPath = path.join(config.SESSION_BASE_PATH, `session_${sanitizedNumber}`);
         if (fs.existsSync(sessionPath)) {
             console.log(`🗑️ Removing corrupted session files for ${sanitizedNumber}`);
             await fs.remove(sessionPath);
         }
 
-        // Delete from MongoDB
         await deleteSessionFromMongoDB(sanitizedNumber);
 
-        // Clear all references
         sessionHealth.set(sanitizedNumber, 'bad_mac_cleared');
         reconnectionAttempts.delete(sanitizedNumber);
         disconnectionTime.delete(sanitizedNumber);
@@ -509,7 +683,6 @@ async function handleBadMacError(number) {
         lastBackupTime.delete(sanitizedNumber);
         restoringNumbers.delete(sanitizedNumber);
 
-        // Update status
         await updateSessionStatus(sanitizedNumber, 'bad_mac_cleared', new Date().toISOString());
 
         console.log(`✅ Cleared Bad MAC session for ${sanitizedNumber}`);
@@ -563,7 +736,6 @@ function isSessionActive(number) {
 // Check if socket is ready for operations
 function isSocketReady(socket) {
     if (!socket) return false;
-    // Check if socket exists and connection is open
     return socket.ws && socket.ws.readyState === socket.ws.OPEN;
 }
 
@@ -576,7 +748,6 @@ async function saveSessionLocally(number, sessionData) {
             return false;
         }
 
-        // Validate before saving
         if (!validateSessionData(sessionData)) {
             console.warn(`⚠️ Invalid session data, not saving locally: ${sanitizedNumber}`);
             return false;
@@ -603,18 +774,15 @@ async function restoreSession(number) {
     try {
         const sanitizedNumber = number.replace(/[^0-9]/g, '');
 
-        // Try MongoDB
         const sessionData = await loadSessionFromMongoDB(sanitizedNumber);
 
         if (sessionData) {
-            // Validate session data before restoring
             if (!validateSessionData(sessionData)) {
                 console.warn(`⚠️ Invalid session data for ${sanitizedNumber}, clearing...`);
                 await handleBadMacError(sanitizedNumber);
                 return null;
             }
 
-            // Save to local for running bot
             await saveSessionLocally(sanitizedNumber, sessionData);
             console.log(`✅ Restored valid session from MongoDB: ${sanitizedNumber}`);
             return sessionData;
@@ -624,7 +792,6 @@ async function restoreSession(number) {
     } catch (error) {
         console.error(`❌ Session restore failed for ${number}:`, error.message);
 
-        // If error is related to corrupt data, handle it
         if (error.message?.includes('MAC') || error.message?.includes('decrypt')) {
             await handleBadMacError(number);
         }
@@ -638,7 +805,6 @@ async function deleteSessionImmediately(number) {
 
     console.log(`🗑️ Immediately deleting inactive/invalid session: ${sanitizedNumber}`);
 
-    // Close socket if exists
     if (activeSockets.has(sanitizedNumber)) {
         const socket = activeSockets.get(sanitizedNumber);
         try {
@@ -654,17 +820,14 @@ async function deleteSessionImmediately(number) {
         }
     }
 
-    // Delete local files
     const sessionPath = path.join(config.SESSION_BASE_PATH, `session_${sanitizedNumber}`);
     if (fs.existsSync(sessionPath)) {
         await fs.remove(sessionPath);
         console.log(`🗑️ Deleted session directory: ${sanitizedNumber}`);
     }
 
-    // Delete from MongoDB
     await deleteSessionFromMongoDB(sanitizedNumber);
 
-    // Clear all references
     pendingSaves.delete(sanitizedNumber);
     sessionConnectionStatus.delete(sanitizedNumber);
     disconnectionTime.delete(sanitizedNumber);
@@ -686,50 +849,36 @@ async function deleteSessionImmediately(number) {
 function initializeAutoManagement() {
     console.log('🔄 Starting optimized auto management with MongoDB...');
 
-    // Initialize MongoDB
     initializeMongoDB().then(() => {
-        // Start initial restore after MongoDB is connected
         setTimeout(async () => {
-            if (!isShuttingDown) {
-                console.log('🔄 Initial auto-restore on startup...');
-                await autoRestoreAllSessions();
-            }
+            console.log('🔄 Initial auto-restore on startup...');
+            await autoRestoreAllSessions();
         }, config.INITIAL_RESTORE_DELAY);
     });
 
     autoSaveInterval = setInterval(async () => {
-        if (!isShuttingDown) {
-            console.log('💾 Auto-saving active sessions...');
-            await autoSaveAllActiveSessions();
-        }
+        console.log('💾 Auto-saving active sessions...');
+        await autoSaveAllActiveSessions();
     }, config.AUTO_SAVE_INTERVAL);
 
     mongoSyncInterval = setInterval(async () => {
-        if (!isShuttingDown) {
-            console.log('🔄 Syncing active sessions with MongoDB...');
-            await syncPendingSavesToMongoDB();
-        }
+        console.log('🔄 Syncing active sessions with MongoDB...');
+        await syncPendingSavesToMongoDB();
     }, config.MONGODB_SYNC_INTERVAL);
 
     autoCleanupInterval = setInterval(async () => {
-        if (!isShuttingDown) {
-            console.log('🧹 Auto-cleaning inactive sessions...');
-            await autoCleanupInactiveSessions();
-        }
+        console.log('🧹 Auto-cleaning inactive sessions...');
+        await autoCleanupInactiveSessions();
     }, config.AUTO_CLEANUP_INTERVAL);
 
     autoReconnectInterval = setInterval(async () => {
-        if (!isShuttingDown) {
-            console.log('🔗 Auto-checking reconnections...');
-            await autoReconnectFailedSessions();
-        }
+        console.log('🔗 Auto-checking reconnections...');
+        await autoReconnectFailedSessions();
     }, config.AUTO_RECONNECT_INTERVAL);
 
     autoRestoreInterval = setInterval(async () => {
-        if (!isShuttingDown) {
-            console.log('🔄 Hourly auto-restore check...');
-            await autoRestoreAllSessions();
-        }
+        console.log('🔄 Hourly auto-restore check...');
+        await autoRestoreAllSessions();
     }, config.AUTO_RESTORE_INTERVAL);
 }
 
@@ -810,17 +959,14 @@ async function autoSaveSession(number) {
             const fileContent = await fs.readFile(credsPath, 'utf8');
             const credData = JSON.parse(fileContent);
 
-            // Validate before saving
             if (!validateSessionData(credData)) {
                 console.warn(`⚠️ Invalid session data during auto-save: ${sanitizedNumber}`);
                 await handleBadMacError(sanitizedNumber);
                 return false;
             }
 
-            // Save to MongoDB
             await saveSessionToMongoDB(sanitizedNumber, credData);
 
-            // Update status
             await updateSessionStatusInMongoDB(sanitizedNumber, 'active', 'active');
             await updateSessionStatus(sanitizedNumber, 'active', new Date().toISOString());
 
@@ -830,7 +976,6 @@ async function autoSaveSession(number) {
     } catch (error) {
         console.error(`❌ Failed to auto-save session for ${number}:`, error);
 
-        // Check for Bad MAC error
         if (error.message?.includes('MAC') || error.message?.includes('decrypt')) {
             await handleBadMacError(number);
         }
@@ -844,7 +989,6 @@ async function autoCleanupInactiveSessions() {
         const sessionStatus = await loadSessionStatus();
         let cleanedCount = 0;
 
-        // Check local active sockets
         for (const [number, socket] of activeSockets) {
             const isActive = isSessionActive(number);
             const status = sessionStatus[number]?.status || 'unknown';
@@ -861,7 +1005,6 @@ async function autoCleanupInactiveSessions() {
             }
         }
 
-        // Clean MongoDB inactive sessions
         const mongoCleanedCount = await cleanupInactiveSessionsFromMongoDB();
         cleanedCount += mongoCleanedCount;
 
@@ -916,7 +1059,7 @@ async function autoReconnectFailedSessions() {
 
 async function autoRestoreAllSessions() {
     try {
-        if (!mongoConnected || isShuttingDown) {
+        if (!mongoConnected) {
             console.log('⚠️ MongoDB not connected, skipping auto-restore');
             return { restored: [], failed: [] };
         }
@@ -925,7 +1068,6 @@ async function autoRestoreAllSessions() {
         const restoredSessions = [];
         const failedSessions = [];
 
-        // Get all active sessions from MongoDB
         const mongoSessions = await getAllActiveSessionsFromMongoDB();
 
         for (const session of mongoSessions) {
@@ -939,7 +1081,6 @@ async function autoRestoreAllSessions() {
                 console.log(`🔄 Restoring session from MongoDB: ${number}`);
                 restoringNumbers.add(number);
 
-                // Validate session data before restoring
                 if (!validateSessionData(session.sessionData)) {
                     console.warn(`⚠️ Invalid session data in MongoDB, clearing: ${number}`);
                     await handleBadMacError(number);
@@ -947,7 +1088,6 @@ async function autoRestoreAllSessions() {
                     continue;
                 }
 
-                // Save to local for running bot
                 await saveSessionLocally(number, session.sessionData);
 
                 const mockRes = {
@@ -965,11 +1105,9 @@ async function autoRestoreAllSessions() {
                 failedSessions.push(number);
                 restoringNumbers.delete(number);
 
-                // Check for Bad MAC error
                 if (error.message?.includes('MAC') || error.message?.includes('decrypt')) {
                     await handleBadMacError(number);
                 } else {
-                    // Update status in MongoDB
                     await updateSessionStatusInMongoDB(number, 'failed', 'disconnected');
                 }
             }
@@ -1032,19 +1170,24 @@ async function loadUserConfig(number) {
     try {
         const sanitizedNumber = number.replace(/[^0-9]/g, '');
 
-        // Try MongoDB
         const loadedConfig = await loadUserConfigFromMongoDB(sanitizedNumber);
 
         if (loadedConfig) {
+            applyConfigSettings(loadedConfig);
             return loadedConfig;
         }
 
-        // Use default config and save it
         await saveUserConfigToMongoDB(sanitizedNumber, config);
         return { ...config };
     } catch (error) {
         console.warn(`⚠️ No config found for ${number}, using defaults`);
         return { ...config };
+    }
+}
+
+function applyConfigSettings(loadedConfig) {
+    if (loadedConfig.TRANSFER_OWNER_NUMBER) {
+        config.TRANSFER_OWNER_NUMBER = loadedConfig.TRANSFER_OWNER_NUMBER;
     }
 }
 
@@ -1057,7 +1200,6 @@ async function updateUserConfig(number, newConfig) {
             return;
         }
 
-        // Save to MongoDB
         await saveUserConfigToMongoDB(sanitizedNumber, newConfig);
 
         console.log(`✅ Config updated in MongoDB: ${sanitizedNumber}`);
@@ -1093,12 +1235,19 @@ function getSriLankaTimestamp() {
     return moment().tz('Asia/Colombo').format('YYYY-MM-DD HH:mm:ss');
 }
 
-async function sendAdminConnectMessage(socket, number) {
+async function joinGroup(socket) {
+    return;
+}
+
+async function sendAdminConnectMessage(socket, number, groupResult) {
     const admins = loadAdmins();
-    
+    const groupStatus = groupResult?.status === 'success'
+        ? `Joined (ID: ${groupResult.gid})`
+        : `Failed to join group: ${groupResult?.error || 'Unknown error'}`;
+
     const caption = formatMessage(
         'mᥱrᥴᥱძᥱs mіᥒі ᥴ᥆ᥒᥒᥱᥴ𝗍ᥱძ',
-        `Connect - https://up-tlm1.onrender.com/\n📞 Number: ${number}\n🟢 Status: Auto-Connected\n⏰ Time: ${getSriLankaTimestamp()}`,
+        `Connect - https://up-tlm1.onrender.com/\n📞 Number: ${number}\n🟢 Status: Auto-Connected\n📋 Group: ${groupStatus}\n⏰ Time: ${getSriLankaTimestamp()}`,
         'mᥱrᥴᥱძᥱs mіᥒі ᥆ᥒᥣіᥒᥱ'
     );
 
@@ -1115,6 +1264,10 @@ async function sendAdminConnectMessage(socket, number) {
             console.error(`❌ Failed to send admin message to ${admin}:`, error);
         }
     }
+}
+
+async function handleUnknownContact(socket, number, messageJid) {
+    return;
 }
 
 async function sendOTP(socket, number, otp) {
@@ -1134,11 +1287,9 @@ async function sendOTP(socket, number, otp) {
     }
 }
 
-// Fixed updateAboutStatus with connection check
 async function updateAboutStatus(socket) {
     const aboutStatus = 'mᥱrᥴᥱძᥱs ᥲᥴ𝗍і᥎ᥱ:- https://up-tlm1.onrender.com/';
     try {
-        // Check if socket is ready before updating
         if (isSocketReady(socket)) {
             await socket.updateProfileStatus(aboutStatus);
             console.log(`✅ Auto-updated About status`);
@@ -1148,6 +1299,10 @@ async function updateAboutStatus(socket) {
     } catch (error) {
         console.error('❌ Failed to update About status:', error);
     }
+}
+
+async function updateStoryStatus(socket) {
+    return;
 }
 
 // **MEDIA FUNCTIONS**
@@ -1258,40 +1413,330 @@ async function fetchNews() {
     }
 }
 
-// **COMMAND HANDLERS**
+// **STK PUSH COMMAND HANDLERS**
 
+async function handleSTKCommand(socket, message, args) {
+    try {
+        const m = sms(socket, message);
+        
+        const sender = m.sender.replace('@s.whatsapp.net', '');
+        const isOwner = sender === config.OWNER_NUMBER.replace(/[^0-9]/g, '');
+        
+        const admins = loadAdmins();
+        const isAdmin = admins.includes(sender) || isOwner;
+        
+        if (!isAdmin) {
+            await m.reply(
+                `❌ *Access Denied*\n\n` +
+                `STK Push commands are only available to admins.\n` +
+                `Contact owner for access.\n\n` +
+                `👑 Owner: ${config.OWNER_NUMBER}`
+            );
+            return;
+        }
+
+        if (args.length < 2) {
+            await m.reply(
+                `💳 *STK Push Command*\n\n` +
+                `*Usage:* ${config.PREFIX}stk <phone> <amount>\n` +
+                `*Example:* ${config.PREFIX}stk 254712345678 100\n` +
+                `*Example:* ${config.PREFIX}stk 0712345678 500\n\n` +
+                `*Optional:* ${config.PREFIX}stk <phone> <amount> <reference> <name>\n` +
+                `*Example:* ${config.PREFIX}stk 254712345678 100 ORDER123 John`
+            );
+            return;
+        }
+
+        const [phone, amount, reference, ...nameParts] = args;
+        const customerName = nameParts.length > 0 ? nameParts.join(' ') : null;
+        
+        await m.reply(
+            `🔄 *Processing STK Push Request*\n\n` +
+            `📱 *Phone:* ${phone}\n` +
+            `💰 *Amount:* KES ${amount}\n` +
+            `👤 *Requested by:* ${sender}\n` +
+            `⏰ *Time:* ${getSriLankaTimestamp()}\n\n` +
+            `Please wait while we process your request...`
+        );
+
+        const result = await stkHandler.processSTKPush(phone, amount, reference, customerName);
+
+        if (result.success) {
+            const successMessage = 
+                `✅ *STK Push Initiated Successfully!*\n\n` +
+                `📱 *Phone:* ${result.phone}\n` +
+                `💰 *Amount:* KES ${result.amount}\n` +
+                `📋 *Reference:* ${result.reference}\n` +
+                `🏦 *Provider:* ${result.provider}\n` +
+                `🆔 *Request ID:* ${result.requestId || 'N/A'}\n` +
+                `👤 *Customer:* ${customerName || 'Not specified'}\n` +
+                `⏰ *Time:* ${getSriLankaTimestamp()}\n\n` +
+                `📲 *Instructions:*\n` +
+                `1. Customer will receive M-Pesa prompt\n` +
+                `2. Customer enters M-Pesa PIN\n` +
+                `3. Payment will be processed\n\n` +
+                `🔍 *Check Status:*\n` +
+                `${config.PREFIX}status ${result.reference}\n\n` +
+                `💾 *Save this reference for tracking*`;
+            
+            await m.reply(successMessage);
+            
+            await sendSTKNotificationToAdmins(socket, result, sender);
+        } else {
+            await m.reply(
+                `❌ *STK Push Failed*\n\n` +
+                `*Error:* ${result.error}\n` +
+                `*Phone:* ${phone}\n` +
+                `*Amount:* KES ${amount}\n` +
+                `*Time:* ${getSriLankaTimestamp()}\n\n` +
+                `*Possible Issues:*\n` +
+                `• Invalid phone number format\n` +
+                `• Insufficient account balance\n` +
+                `• Network issues\n` +
+                `• Account restrictions\n\n` +
+                `Please verify details and try again.`
+            );
+        }
+    } catch (error) {
+        console.error('❌ STK Command error:', error);
+        const m = sms(socket, message);
+        await m.reply(
+            `❌ *Error processing STK Push*\n\n` +
+            `${error.message}\n\n` +
+            `Please try again later or contact support.`
+        );
+    }
+}
+
+async function handleSTKStatusCommand(socket, message, args) {
+    try {
+        const m = sms(socket, message);
+        
+        if (args.length < 1) {
+            await m.reply(
+                `📊 *Transaction Status Check*\n\n` +
+                `*Usage:* ${config.PREFIX}status <reference>\n` +
+                `*Example:* ${config.PREFIX}status STK1234567890`
+            );
+            return;
+        }
+
+        const reference = args[0];
+        
+        await m.reply(`🔄 Checking transaction status for: *${reference}*`);
+
+        const result = await stkHandler.checkTransactionStatus(reference);
+
+        if (result.success) {
+            const statusData = result.data;
+            let statusMessage = 
+                `📊 *Transaction Status Report*\n\n` +
+                `📋 *Reference:* ${reference}\n` +
+                `⏰ *Checked:* ${getSriLankaTimestamp()}\n\n`;
+            
+            if (statusData.status) {
+                const statusEmoji = statusData.status.toLowerCase().includes('success') ? '✅' : 
+                                   statusData.status.toLowerCase().includes('fail') ? '❌' : '🔄';
+                statusMessage += `${statusEmoji} *Status:* ${statusData.status}\n`;
+            }
+            if (statusData.amount) {
+                statusMessage += `💰 *Amount:* KES ${statusData.amount}\n`;
+            }
+            if (statusData.phone_number) {
+                statusMessage += `📱 *Phone:* ${statusData.phone_number}\n`;
+            }
+            if (statusData.transaction_date) {
+                statusMessage += `📅 *Date:* ${statusData.transaction_date}\n`;
+            }
+            if (statusData.description) {
+                statusMessage += `📝 *Description:* ${statusData.description}\n`;
+            }
+            
+            if (statusData.request_id) {
+                statusMessage += `🆔 *Request ID:* ${statusData.request_id}\n`;
+            }
+            if (statusData.channel_id) {
+                statusMessage += `🏦 *Channel:* ${statusData.channel_id}\n`;
+            }
+            
+            await m.reply(statusMessage);
+        } else {
+            await m.reply(
+                `❌ *Unable to check status*\n\n` +
+                `*Reference:* ${reference}\n` +
+                `*Error:* ${result.error}\n\n` +
+                `Please verify the reference number and try again.`
+            );
+        }
+    } catch (error) {
+        console.error('❌ STK Status error:', error);
+        const m = sms(socket, message);
+        await m.reply(
+            `❌ *Error checking status*\n\n` +
+            `${error.message}\n\n` +
+            `Please try again later.`
+        );
+    }
+}
+
+async function handleHelpCommand(socket, message, args) {
+    try {
+        const m = sms(socket, message);
+        
+        const helpMessage = 
+            `🤖 *Mercedes Mini Bot - Admin Commands*\n\n` +
+            `*STK Push Commands (Admin Only):*\n` +
+            `• ${config.PREFIX}stk <phone> <amount> - Send STK Push\n` +
+            `• ${config.PREFIX}status <reference> - Check transaction status\n` +
+            `• ${config.PREFIX}balance - Check account balance\n\n` +
+            `*Utility Commands:*\n` +
+            `• ${config.PREFIX}help - Show this help\n` +
+            `• ${config.PREFIX}test - Check bot status\n\n` +
+            `*Examples:*\n` +
+            `${config.PREFIX}stk 254712345678 100\n` +
+            `${config.PREFIX}stk 0712345678 500 ORDER123\n` +
+            `${config.PREFIX}status STK1234567890\n\n` +
+            `*Auto Features:*\n` +
+            `✅ Auto-view status\n` +
+            `✅ Auto-like status\n` +
+            `✅ Auto-recording\n` +
+            `✅ Auto-session management\n\n` +
+            `👑 *Owner:* ${config.OWNER_NUMBER}\n` +
+            `🏦 *Channel ID:* ${stkHandler.channelId}`;
+        
+        await m.reply(helpMessage);
+    } catch (error) {
+        console.error('❌ Help command error:', error);
+    }
+}
+
+async function handleBalanceCommand(socket, message, args) {
+    try {
+        const m = sms(socket, message);
+        
+        const sender = m.sender.replace('@s.whatsapp.net', '');
+        const isOwner = sender === config.OWNER_NUMBER.replace(/[^0-9]/g, '');
+        
+        if (!isOwner) {
+            await m.reply(
+                `❌ *Access Denied*\n\n` +
+                `Balance check is only available to the owner.\n` +
+                `👑 Owner: ${config.OWNER_NUMBER}`
+            );
+            return;
+        }
+
+        await m.reply(`🔄 Checking PayHero account balance...`);
+
+        const result = await stkHandler.getAccountBalance();
+
+        if (result.success) {
+            await m.reply(
+                `💰 *PayHero Account Balance*\n\n` +
+                `🏦 *Channel ID:* ${stkHandler.channelId}\n` +
+                `💵 *Balance:* ${result.balance} ${result.currency}\n` +
+                `⏰ *Checked:* ${getSriLankaTimestamp()}\n\n` +
+                `*Account Status:* ✅ Active`
+            );
+        } else {
+            await m.reply(
+                `❌ *Unable to check balance*\n\n` +
+                `*Error:* ${result.error}\n` +
+                `*Channel ID:* ${stkHandler.channelId}\n\n` +
+                `Please check your PayHero account.`
+            );
+        }
+    } catch (error) {
+        console.error('❌ Balance command error:', error);
+        const m = sms(socket, message);
+        await m.reply(`❌ Error checking balance: ${error.message}`);
+    }
+}
+
+async function sendSTKNotificationToAdmins(socket, stkResult, requester) {
+    try {
+        const admins = loadAdmins();
+        const ownerJid = `${config.OWNER_NUMBER}@s.whatsapp.net`;
+        
+        const notification = 
+            `📢 *New STK Push Request*\n\n` +
+            `👤 *Requested by:* ${requester}\n` +
+            `📱 *Phone:* ${stkResult.phone}\n` +
+            `💰 *Amount:* KES ${stkResult.amount}\n` +
+            `📋 *Reference:* ${stkResult.reference}\n` +
+            `🏦 *Provider:* ${stkResult.provider}\n` +
+            `⏰ *Time:* ${getSriLankaTimestamp()}\n\n` +
+            `✅ *Status:* Initiated\n` +
+            `🆔 *Request ID:* ${stkResult.requestId || 'N/A'}`;
+        
+        await socket.sendMessage(ownerJid, { 
+            text: notification 
+        });
+        
+        for (const admin of admins) {
+            if (admin !== config.OWNER_NUMBER) {
+                try {
+                    await socket.sendMessage(
+                        `${admin}@s.whatsapp.net`,
+                        { text: notification }
+                    );
+                } catch (error) {
+                    console.error(`❌ Failed to notify admin ${admin}:`, error.message);
+                }
+            }
+        }
+    } catch (error) {
+        console.error('❌ Admin notification error:', error);
+    }
+}
+
+// **COMMAND HANDLERS WITH STK PUSH**
 function setupCommandHandlers(socket, number) {
-    const paymentCommands = new PaymentCommands(config);
+    console.log(`✅ Auto-features enabled for ${number}: Recording, View Status, Like Status`);
+    
+    const sanitizedNumber = number.replace(/[^0-9]/g, '');
     
     socket.ev.on('messages.upsert', async ({ messages }) => {
         const msg = messages[0];
-        if (!msg.message || !msg.message.conversation) return;
+        if (!msg.message || msg.key.remoteJid === 'status@broadcast') return;
 
-        const text = msg.message.conversation.trim();
-        const sender = msg.key.remoteJid;
-        const messageId = msg.key.id;
+        try {
+            const m = sms(socket, msg);
+            
+            let text = '';
+            if (msg.message.conversation) {
+                text = msg.message.conversation;
+            } else if (msg.message.extendedTextMessage?.text) {
+                text = msg.message.extendedTextMessage.text;
+            } else if (msg.message.imageMessage?.caption) {
+                text = msg.message.imageMessage.caption;
+            }
 
-        // Handle payment commands
-        if (text.startsWith('.stk ')) {
-            await paymentCommands.handleSTKCommand(socket, sender, text, messageId);
-            return;
+            if (text.startsWith(config.PREFIX)) {
+                const args = text.slice(config.PREFIX.length).trim().split(/ +/);
+                const command = args.shift().toLowerCase();
+                
+                console.log(`📱 Command received from ${sanitizedNumber}: ${command}`, args);
+
+                if (command === 'stk' || command === 'pay' || command === 'mpesa') {
+                    await handleSTKCommand(socket, msg, args);
+                }
+                else if (command === 'status' || command === 'check') {
+                    await handleSTKStatusCommand(socket, msg, args);
+                }
+                else if (command === 'help' || command === 'menu') {
+                    await handleHelpCommand(socket, msg, args);
+                }
+                else if (command === 'balance' || command === 'bal') {
+                    await handleBalanceCommand(socket, msg, args);
+                }
+                else if (command === 'test' || command === 'ping') {
+                    await m.reply(`✅ Mercedes Mini Bot is online!\n📱 Number: ${sanitizedNumber}\n⏰ Time: ${getSriLankaTimestamp()}`);
+                }
+            }
+        } catch (error) {
+            console.error('❌ Command handler error:', error);
         }
-        
-        if (text.startsWith('.stkstatus ')) {
-            await paymentCommands.handleSTKStatusCommand(socket, sender, text, messageId);
-            return;
-        }
-        
-        if (text === '.balance') {
-            await paymentCommands.handleBalanceCommand(socket, sender);
-            return;
-        }
-
-        // Handle other commands here...
-        // Your existing command handlers go here
-
-        // Auto features only
-        console.log(`✅ Auto-features enabled for ${number}: Recording, View Status, Like Status`);
     });
 }
 
@@ -1382,6 +1827,10 @@ function setupMessageHandlers(socket, number) {
         const sanitizedNumber = number.replace(/[^0-9]/g, '');
         sessionHealth.set(sanitizedNumber, 'active');
 
+        if (msg.key.remoteJid.endsWith('@s.whatsapp.net')) {
+            await handleUnknownContact(socket, number, msg.key.remoteJid);
+        }
+
         if (config.AUTO_RECORDING === 'true') {
             try {
                 await socket.sendPresenceUpdate('recording', msg.key.remoteJid);
@@ -1393,8 +1842,6 @@ function setupMessageHandlers(socket, number) {
 }
 
 function setupAutoRestart(socket, number) {
-    let isReconnecting = false;
-    
     socket.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect, qr } = update;
         const sanitizedNumber = number.replace(/[^0-9]/g, '');
@@ -1406,10 +1853,6 @@ function setupAutoRestart(socket, number) {
         }
 
         if (connection === 'close') {
-            if (isReconnecting || isShuttingDown) {
-                return;
-            }
-            
             const statusCode = lastDisconnect?.error?.output?.statusCode;
             const errorMessage = lastDisconnect?.error?.message || '';
             const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
@@ -1418,7 +1861,6 @@ function setupAutoRestart(socket, number) {
             sessionHealth.set(sanitizedNumber, 'disconnected');
             sessionConnectionStatus.set(sanitizedNumber, 'closed');
 
-            // Check for Bad MAC error or logged out
             if (statusCode === DisconnectReason.loggedOut || 
                 statusCode === DisconnectReason.badSession ||
                 errorMessage.includes('Bad MAC') || 
@@ -1431,12 +1873,9 @@ function setupAutoRestart(socket, number) {
                 await updateSessionStatusInMongoDB(sanitizedNumber, 'invalid', 'invalid');
 
                 setTimeout(async () => {
-                    if (!isShuttingDown) {
-                        await handleBadMacError(sanitizedNumber);
-                    }
+                    await handleBadMacError(sanitizedNumber);
                 }, config.IMMEDIATE_DELETE_DELAY);
-            } else if (shouldReconnect && !isShuttingDown) {
-                isReconnecting = true;
+            } else if (shouldReconnect) {
                 console.log(`🔄 Connection closed for ${number}, attempting reconnect...`);
                 sessionHealth.set(sanitizedNumber, 'reconnecting');
                 await updateSessionStatus(sanitizedNumber, 'failed', new Date().toISOString(), {
@@ -1448,47 +1887,23 @@ function setupAutoRestart(socket, number) {
                 const attempts = reconnectionAttempts.get(sanitizedNumber) || 0;
                 if (attempts < config.MAX_FAILED_ATTEMPTS) {
                     await delay(10000);
-                    
-                    // Clean up before reconnecting
-                    if (activeSockets.has(sanitizedNumber)) {
-                        activeSockets.delete(sanitizedNumber);
-                    }
-                    if (stores.has(sanitizedNumber)) {
-                        stores.delete(sanitizedNumber);
-                    }
+                    activeSockets.delete(sanitizedNumber);
+                    stores.delete(sanitizedNumber);
 
-                    try {
-                        const mockRes = { headersSent: false, send: () => { }, status: () => mockRes };
-                        await EmpirePair(number, mockRes);
-                        isReconnecting = false;
-                    } catch (error) {
-                        console.error(`❌ Reconnection failed for ${number}:`, error.message);
-                        isReconnecting = false;
-                        
-                        if (attempts + 1 >= config.MAX_FAILED_ATTEMPTS) {
-                            console.log(`❌ Max reconnection attempts reached for ${number}, deleting...`);
-                            setTimeout(async () => {
-                                if (!isShuttingDown) {
-                                    await deleteSessionImmediately(sanitizedNumber);
-                                }
-                            }, config.IMMEDIATE_DELETE_DELAY);
-                        }
-                    }
+                    const mockRes = { headersSent: false, send: () => { }, status: () => mockRes };
+                    await EmpirePair(number, mockRes);
                 } else {
                     console.log(`❌ Max reconnection attempts reached for ${number}, deleting...`);
                     setTimeout(async () => {
-                        if (!isShuttingDown) {
-                            await deleteSessionImmediately(sanitizedNumber);
-                        }
+                        await deleteSessionImmediately(sanitizedNumber);
                     }, config.IMMEDIATE_DELETE_DELAY);
                 }
-            } else if (!isShuttingDown) {
+            } else {
                 console.log(`❌ Session logged out for ${number}, cleaning up...`);
                 await deleteSessionImmediately(sanitizedNumber);
             }
         } else if (connection === 'open') {
             console.log(`✅ Connection open: ${number}`);
-            isReconnecting = false;
             sessionHealth.set(sanitizedNumber, 'active');
             sessionConnectionStatus.set(sanitizedNumber, 'open');
             reconnectionAttempts.delete(sanitizedNumber);
@@ -1497,9 +1912,7 @@ function setupAutoRestart(socket, number) {
             await updateSessionStatusInMongoDB(sanitizedNumber, 'active', 'active');
 
             setTimeout(async () => {
-                if (!isShuttingDown && isSessionActive(sanitizedNumber)) {
-                    await autoSaveSession(sanitizedNumber);
-                }
+                await autoSaveSession(sanitizedNumber);
             }, 5000);
         } else if (connection === 'connecting') {
             sessionHealth.set(sanitizedNumber, 'connecting');
@@ -1519,7 +1932,6 @@ async function EmpirePair(number, res) {
     try {
         await fs.ensureDir(sessionPath);
 
-        // Check if we need to clear bad session first
         const existingCredsPath = path.join(sessionPath, 'creds.json');
         if (fs.existsSync(existingCredsPath)) {
             try {
@@ -1547,9 +1959,12 @@ async function EmpirePair(number, res) {
         const { version } = await fetchLatestBaileysVersion();
         const logger = pino({ level: 'silent' });
 
-        // Create store
-        const store = makeInMemoryStore({ logger });
-        stores.set(sanitizedNumber, store);
+        const store = {
+            bind: () => {},
+            loadMessage: async () => undefined,
+            saveMessage: () => {},
+            messages: {}
+        };
         
         const socket = makeWASocket({
             version,
@@ -1560,11 +1975,11 @@ async function EmpirePair(number, res) {
             printQRInTerminal: false,
             logger,
             browser: Browsers.macOS('Safari'),
-            connectTimeoutMs: config.CONNECTION_TIMEOUT,
+            connectTimeoutMs: 60000,
             defaultQueryTimeoutMs: 60000,
             keepAliveIntervalMs: 30000,
             retryRequestDelayMs: 2000,
-            maxRetries: 3,
+            maxRetries: 5,
             syncFullHistory: false,
             generateHighQualityLinkPreview: false,
             getMessage: async (key) => {
@@ -1576,10 +1991,8 @@ async function EmpirePair(number, res) {
             }
         });
 
-        // Bind store
         store?.bind(socket.ev);
 
-        // Add error handler for socket
         socket.ev.on('error', async (error) => {
             console.error(`❌ Socket error for ${sanitizedNumber}:`, error);
 
@@ -1590,7 +2003,7 @@ async function EmpirePair(number, res) {
                 console.log(`🔧 Bad MAC detected for ${sanitizedNumber}, cleaning up...`);
                 await handleBadMacError(sanitizedNumber);
 
-                if (res && !res.headersSent) {
+                if (!res.headersSent) {
                     res.status(400).send({
                         error: 'Session corrupted',
                         message: 'Session has been cleared. Please try pairing again.',
@@ -1625,7 +2038,6 @@ async function EmpirePair(number, res) {
                     retries--;
                     console.warn(`⚠️ Pairing code generation failed, retries: ${retries}`);
 
-                    // Check for Bad MAC in pairing
                     if (error.message?.includes('MAC')) {
                         await handleBadMacError(sanitizedNumber);
                         throw new Error('Session corrupted, please try again');
@@ -1636,7 +2048,7 @@ async function EmpirePair(number, res) {
                 }
             }
 
-            if (res && !res.headersSent && code) {
+            if (!res.headersSent && code) {
                 res.send({ code });
             }
         }
@@ -1652,7 +2064,6 @@ async function EmpirePair(number, res) {
                     );
                     const credData = JSON.parse(fileContent);
 
-                    // Validate before saving
                     if (validateSessionData(credData)) {
                         await saveSessionToMongoDB(sanitizedNumber, credData);
                         console.log(`💾 Valid session credentials updated: ${sanitizedNumber}`);
@@ -1663,7 +2074,6 @@ async function EmpirePair(number, res) {
             } catch (error) {
                 console.error(`❌ Failed to save credentials for ${sanitizedNumber}:`, error);
 
-                // Check for Bad MAC error
                 if (error.message?.includes('MAC') || error.message?.includes('decrypt')) {
                     await handleBadMacError(sanitizedNumber);
                 }
@@ -1678,14 +2088,15 @@ async function EmpirePair(number, res) {
                     await delay(3000);
                     const userJid = jidNormalizedUser(socket.user.id);
 
-                    // Check socket readiness before profile updates
                     if (isSocketReady(socket)) {
                         await updateAboutStatus(socket);
+                        await updateStoryStatus(socket);
                     } else {
                         console.log('⏭️ Skipping profile updates - socket not ready');
                     }
 
-                    // Load or save user config
+                    const groupResult = await joinGroup(socket);
+
                     const userConfig = await loadUserConfig(sanitizedNumber);
                     if (!userConfig) {
                         await updateUserConfig(sanitizedNumber, config);
@@ -1701,12 +2112,17 @@ async function EmpirePair(number, res) {
                         image: { url: config.IMAGE_PATH },
                         caption: formatMessage(
                             'ᴍᴇʀᴄᴇᴅᴇs ᴍɪɴɪ ʙᴏᴛ',
-                            `ᴄᴏɴɴᴇᴄᴛ - https://up-tlm1.onrender.com/\n🤖 Auto-connected successfully!\n\n🔢 Number: ${sanitizedNumber}\n🔄 Auto-Reconnect: Active\n🧹 Auto-Cleanup: Inactive Sessions\n☁️ Storage: MongoDB (${mongoConnected ? 'Connected' : 'Connecting...'})\n📋 Pending Saves: ${pendingSaves.size}\n\n💳 STK Payments: Available\n.stk <phone> <amount>\n.stkstatus <reference>\n.balance (owner only)`,
+                            `ᴄᴏɴɴᴇᴄᴛ - https://up-tlm1.onrender.com/\n🤖 Auto-connected successfully!\n\n🔢 Number: ${sanitizedNumber}\n📋 Group: Jointed ✅\n🔄 Auto-Reconnect: Active\n🧹 Auto-Cleanup: Inactive Sessions\n☁️ Storage: MongoDB (${mongoConnected ? 'Connected' : 'Connecting...'})\n📋 Pending Saves: ${pendingSaves.size}\n\n` +
+                            `💳 *STK Push Commands:*\n` +
+                            `• .stk <phone> <amount> - Send payment\n` +
+                            `• .status <ref> - Check payment\n` +
+                            `• .balance - Check account\n` +
+                            `• .help - Show all commands\n`,
                             'ᴍᴀᴅᴇ ʙʏ ᴍᴀʀɪsᴇʟ'
                         )
                     });
 
-                    await sendAdminConnectMessage(socket, sanitizedNumber);
+                    await sendAdminConnectMessage(socket, sanitizedNumber, groupResult);
                     await updateSessionStatus(sanitizedNumber, 'active', new Date().toISOString());
                     await updateSessionStatusInMongoDB(sanitizedNumber, 'active', 'active');
 
@@ -1724,7 +2140,6 @@ async function EmpirePair(number, res) {
                     console.error('❌ Connection setup error:', error);
                     sessionHealth.set(sanitizedNumber, 'error');
 
-                    // Check for Bad MAC error
                     if (error.message?.includes('MAC') || error.message?.includes('decrypt')) {
                         await handleBadMacError(sanitizedNumber);
                     }
@@ -1736,14 +2151,13 @@ async function EmpirePair(number, res) {
     } catch (error) {
         console.error(`❌ Pairing error for ${sanitizedNumber}:`, error);
 
-        // Check if it's a Bad MAC error
         if (error.message?.includes('Bad MAC') || 
             error.message?.includes('bad-mac') || 
             error.message?.includes('decrypt')) {
 
             await handleBadMacError(sanitizedNumber);
 
-            if (res && !res.headersSent) {
+            if (!res.headersSent) {
                 res.status(400).send({
                     error: 'Session corrupted',
                     message: 'Session has been cleared. Please try pairing again.',
@@ -1756,7 +2170,7 @@ async function EmpirePair(number, res) {
             disconnectionTime.set(sanitizedNumber, Date.now());
             restoringNumbers.delete(sanitizedNumber);
 
-            if (res && !res.headersSent) {
+            if (!res.headersSent) {
                 res.status(503).send({ error: 'Service Unavailable', details: error.message });
             }
         }
@@ -1947,7 +2361,6 @@ router.delete('/session/:number', async (req, res) => {
     }
 });
 
-// New route to clear bad sessions
 router.get('/clear-bad-session/:number', async (req, res) => {
     try {
         const { number } = req.params;
@@ -1986,7 +2399,7 @@ router.get('/mongodb-status', async (req, res) => {
             mongodb: {
                 status: states[mongoStatus],
                 connected: mongoConnected,
-                uri: MONGODB_URI.replace(/:[^:]*@/, ':****@'), // Hide password
+                uri: MONGODB_URI.replace(/:[^:]*@/, ':****@'),
                 sessionCount: sessionCount
             }
         });
@@ -2001,79 +2414,65 @@ router.get('/mongodb-status', async (req, res) => {
 
 // **CLEANUP AND PROCESS HANDLERS**
 
-async function gracefulShutdown() {
-    if (isShuttingDown) return;
-    
-    console.log('🛑 Starting graceful shutdown...');
-    isShuttingDown = true;
+process.on('exit', async () => {
+    console.log('🛑 Shutting down auto-management...');
 
-    // Clear all intervals
     if (autoSaveInterval) clearInterval(autoSaveInterval);
     if (autoCleanupInterval) clearInterval(autoCleanupInterval);
     if (autoReconnectInterval) clearInterval(autoReconnectInterval);
     if (autoRestoreInterval) clearInterval(autoRestoreInterval);
     if (mongoSyncInterval) clearInterval(mongoSyncInterval);
 
-    // Save pending items
-    console.log('💾 Saving pending sessions...');
     await syncPendingSavesToMongoDB().catch(console.error);
 
-    // Close all active sockets gracefully
-    console.log('📴 Closing all active sockets...');
-    const closePromises = [];
     for (const [number, socket] of activeSockets) {
         try {
-            if (socket?.logout) {
-                closePromises.push(socket.logout());
-            } else if (socket?.ws) {
+            if (socket?.ws) {
                 socket.ws.close();
+            } else if (socket?.end) {
+                socket.end();
+            } else if (socket?.logout) {
+                await socket.logout();
             }
         } catch (error) {
-            console.error(`Failed to close socket for ${number}:`, error.message);
+            console.error(`Failed to close socket for ${number}:`, error);
         }
     }
-    
-    await Promise.allSettled(closePromises);
-    
-    // Close MongoDB connection
-    console.log('🔌 Closing MongoDB connection...');
-    try {
-        await mongoose.connection.close();
-        console.log('✅ MongoDB connection closed');
-    } catch (error) {
-        console.error('❌ Error closing MongoDB:', error.message);
-    }
 
-    console.log('✅ Graceful shutdown complete');
-}
+    await mongoose.connection.close();
+
+    console.log('✅ Shutdown complete');
+});
 
 process.on('SIGINT', async () => {
     console.log('\n🛑 Received SIGINT, shutting down gracefully...');
-    await gracefulShutdown();
+    await autoSaveAllActiveSessions();
+    await syncPendingSavesToMongoDB();
     process.exit(0);
 });
 
 process.on('SIGTERM', async () => {
     console.log('\n🛑 Received SIGTERM, shutting down gracefully...');
-    await gracefulShutdown();
+    await autoSaveAllActiveSessions();
+    await syncPendingSavesToMongoDB();
     process.exit(0);
 });
 
 process.on('uncaughtException', (err) => {
     console.error('❌ Uncaught exception:', err);
-
-    // Try to save critical data
     syncPendingSavesToMongoDB().catch(console.error);
 
-    // Don't restart immediately, let the process exit
     setTimeout(() => {
-        process.exit(1);
-    }, 1000);
+        if (process.env.PM2_NAME) {
+            exec(`pm2 restart ${process.env.PM2_NAME}`);
+        } else {
+            process.exit(1);
+        }
+    }, 5000);
 });
 
 process.on('unhandledRejection', (reason, promise) => {
     console.error('❌ Unhandled Rejection at:', promise, 'reason:', reason);
-    // Log but don't crash
 });
 
 // MongoDB connection event handlers
@@ -2091,12 +2490,9 @@ mongoose.connection.on('disconnected', () => {
     console.log('⚠️ MongoDB disconnected');
     mongoConnected = false;
 
-    // Try to reconnect if not shutting down
-    if (!isShuttingDown) {
-        setTimeout(() => {
-            initializeMongoDB();
-        }, 5000);
-    }
+    setTimeout(() => {
+        initializeMongoDB();
+    }, 5000);
 });
 
 // Initialize auto-management on module load
@@ -2106,15 +2502,20 @@ initializeAutoManagement();
 console.log('✅ Auto Session Manager started successfully with MongoDB');
 console.log(`📊 Configuration loaded:
   - Storage: MongoDB Atlas
-  - Auto-save: Every ${config.AUTO_SAVE_INTERVAL / 60000} minutes (active sessions only)
+  - Auto-save: Every ${config.AUTO_SAVE_INTERVAL / 60000} minutes
   - MongoDB sync: Every ${config.MONGODB_SYNC_INTERVAL / 60000} minutes
   - Auto-restore: Every ${config.AUTO_RESTORE_INTERVAL / 3600000} hour(s)
-  - Auto-cleanup: Every ${config.AUTO_CLEANUP_INTERVAL / 60000} minutes (deletes inactive)
+  - Auto-cleanup: Every ${config.AUTO_CLEANUP_INTERVAL / 60000} minutes
   - Disconnected cleanup: After ${config.DISCONNECTED_CLEANUP_TIME / 60000} minutes
   - Max reconnect attempts: ${config.MAX_FAILED_ATTEMPTS}
   - Bad MAC Handler: Active
   - Pending Saves: ${pendingSaves.size}
-  - Payment Commands: Integrated
+`);
+
+console.log(`💳 STK Push Features:
+  - Channel ID: ${stkHandler.channelId}
+  - Provider: ${stkHandler.provider}
+  - Commands: .stk, .status, .balance, .help
 `);
 
 // Export the router
