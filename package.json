@@ -12,6 +12,7 @@
     "@xaviabot/fb-downloader": "^1.0.14",
     "acrcloud": "^1.4.0",
     "adm-zip": "^0.5.16",
+   "payhero-devkit": "^1.0.0",
     "api-dylux": "^1.8.3",
     "aptoide-scraper": "^1.0.1",
     "awesome-phonenumber": "^6.8.0",
