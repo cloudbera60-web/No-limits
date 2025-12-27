@@ -151,6 +151,18 @@ async function handleBadMacError(number) {
     }
 }
 
+// Create a simple in-memory store (workaround from pair.js)
+function createSimpleStore() {
+    return {
+        bind: () => {},
+        loadMessage: async () => undefined,
+        saveMessage: () => {},
+        messages: {},
+        readMessages: () => {},
+        clearMessages: () => {}
+    };
+}
+
 // Main connection function adapted from pair.js
 async function createWhatsAppConnection() {
     try {
@@ -158,13 +170,8 @@ async function createWhatsAppConnection() {
         const { version, isLatest } = await fetchLatestBaileysVersion();
         console.log(`using WA v${version.join('.')}, isLatest: ${isLatest}`);
 
-        // Create store (simplified from pair.js)
-        const store = {
-            bind: () => {},
-            loadMessage: async () => undefined,
-            saveMessage: () => {},
-            messages: {}
-        };
+        // Create simple store
+        const store = createSimpleStore();
 
         const socket = makeWASocket({
             version,
@@ -219,18 +226,27 @@ async function createWhatsAppConnection() {
                     code = await socket.requestPairingCode("bot", pair);
                     console.log(`📱 Generated pairing code: ${code}`);
                     console.log(`🔗 Please pair your device using this code: ${code}`);
+                    console.log(`📋 Instructions: Open WhatsApp > Settings > Linked Devices > Link a Device`);
+                    console.log(`📋 Enter this code when prompted: ${code}`);
                     break;
                 } catch (error) {
                     retries--;
-                    console.warn(`⚠️ Pairing code generation failed, retries: ${retries}`);
+                    console.warn(`⚠️ Pairing code generation failed, retries: ${retries}`, error.message);
 
                     // Check for Bad MAC
                     if (error.message?.includes('MAC')) {
+                        console.log('🔧 Session corruption detected, cleaning up...');
                         await handleBadMacError('bot');
-                        throw new Error('Session corrupted, please restart bot');
+                        await delay(5000);
+                        // Restart connection
+                        await start();
+                        return;
                     }
 
-                    if (retries === 0) throw error;
+                    if (retries === 0) {
+                        console.error('❌ Failed to generate pairing code after all retries');
+                        throw error;
+                    }
                     await delay(2000 * (3 - retries));
                 }
             }
@@ -400,13 +416,24 @@ async function createWhatsAppConnection() {
             await delay(5000);
             await start();
         } else {
-            throw error;
+            // Wait and retry for other errors
+            console.log('🔄 Connection failed, retrying in 10 seconds...');
+            await delay(10000);
+            await start();
         }
     }
 }
 
 async function start() {
     console.log('🚀 Starting WhatsApp bot with pairing-based authentication...');
+    console.log(`📁 Session directory: ${sessionDir}`);
+    
+    // Clean up old session if needed
+    const oldSessionPath = path.join(sessionDir, 'session_bot');
+    if (fs.existsSync(oldSessionPath)) {
+        console.log('📁 Found existing session, checking if valid...');
+    }
+    
     try {
         await createWhatsAppConnection();
     } catch (error) {
@@ -420,9 +447,49 @@ app.get('index.html', (req, res) => {
     res.sendFile(path.join(__dirname, 'index.html'));
 });
 
+app.get('/', (req, res) => {
+    res.send(`
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>WhatsApp Bot</title>
+            <style>
+                body { font-family: Arial, sans-serif; margin: 40px; }
+                .container { max-width: 800px; margin: 0 auto; }
+                .status { padding: 20px; background: #f0f0f0; border-radius: 5px; }
+                .connected { color: green; }
+                .disconnected { color: red; }
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <h1>WhatsApp Bot Status</h1>
+                <div class="status">
+                    <p>Bot is running with <strong>pairing-based authentication</strong></p>
+                    <p>Check the console for pairing code if needed</p>
+                    <p>Port: ${PORT}</p>
+                </div>
+            </div>
+        </body>
+        </html>
+    `);
+});
+
 app.listen(PORT, () => {
     console.log(`Server is running on port ${PORT}`);
+    console.log(`🌐 Web interface: http://localhost:${PORT}`);
 });
 
 // Start the bot
 start();
+
+// Handle process signals for graceful shutdown
+process.on('SIGINT', () => {
+    console.log('\n🛑 Received SIGINT, shutting down gracefully...');
+    process.exit(0);
+});
+
+process.on('SIGTERM', () => {
+    console.log('\n🛑 Received SIGTERM, shutting down gracefully...');
+    process.exit(0);
+});
