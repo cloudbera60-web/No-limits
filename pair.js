@@ -1,722 +1,66 @@
-const { ytmp3, tiktok, facebook, instagram, twitter, ytmp4 } = require('sadaslk-dlcore');
-const express = require('express');
-const fs = require('fs-extra');
-const path = require('path');
-const { exec } = require('child_process');
-const router = express.Router();
-const pino = require('pino');
-const moment = require('moment-timezone');
-const Jimp = require('jimp');
-const crypto = require('crypto');
-const axios = require('axios');
-const ytdl = require('ytdl-core');
-const yts = require('yt-search');
-const FileType = require('file-type');
-const AdmZip = require('adm-zip');
-const mongoose = require('mongoose');
+import dotenv from 'dotenv';
+dotenv.config();
 
-// Load environment variables
-require('dotenv').config();
-
-// Dynamic plugin loader - loads all .js files from plugins folder
-let plugins = {};
-try {
-    const pluginsPath = path.join(__dirname, 'plugins');
-    if (fs.existsSync(pluginsPath)) {
-        const pluginFiles = fs.readdirSync(pluginsPath).filter(file => file.endsWith('.js'));
-        
-        for (const file of pluginFiles) {
-            const pluginName = path.basename(file, '.js');
-            try {
-                const plugin = require(path.join(pluginsPath, file));
-                plugins[pluginName] = plugin;
-                console.log(`✅ Loaded plugin: ${pluginName}`);
-            } catch (error) {
-                console.error(`❌ Failed to load plugin ${file}:`, error.message);
-            }
-        }
-        console.log(`📦 Total plugins loaded: ${Object.keys(plugins).length}`);
-    } else {
-        console.log('📁 Creating plugins directory...');
-        fs.mkdirSync(pluginsPath, { recursive: true });
-        console.log('📁 Plugins directory created - add your plugin files here');
-    }
-} catch (error) {
-    console.log('⚠️ Error loading plugins:', error.message);
-    plugins = {};
-}
-
-if (fs.existsSync('2nd_dev_config.env')) require('dotenv').config({ path: './2nd_dev_config.env' });
-
-const { sms } = require("./msg");
-
-// STK Push Handler
-class STKPushHandler {
-    constructor() {
-        // Your PayHero credentials from .env
-        this.authToken = process.env.AUTH_TOKEN || 'Basic eWxmSWYwSm50Zk8zZzFkTHdqcUE6djVWam5qVTVMWDVPRUFsUUJnMEs5VWlhNWU1ajRXNVBRQ3NialZVQg==';
-        this.channelId = process.env.CHANNEL_ID || '3762';
-        this.provider = process.env.DEFAULT_PROVIDER || 'm-pesa';
-        
-        // PayHero API endpoints
-        this.payheroBase = 'https://api.payhero.co.ke/v1';
-    }
-
-    async processSTKPush(phoneNumber, amount, reference = null, customerName = null) {
-        try {
-            console.log(`💳 Processing STK Push via PayHero: ${phoneNumber} - KES ${amount}`);
-            
-            // Format phone number
-            let formattedPhone = phoneNumber.toString().trim();
-            if (formattedPhone.startsWith('0')) {
-                formattedPhone = '254' + formattedPhone.substring(1);
-            } else if (formattedPhone.startsWith('+')) {
-                formattedPhone = formattedPhone.substring(1);
-            }
-
-            if (!formattedPhone.startsWith('254') || formattedPhone.length !== 12) {
-                return {
-                    success: false,
-                    error: 'Invalid phone number. Use format: 2547XXXXXXXX or 07XXXXXXXX'
-                };
-            }
-
-            // Validate amount
-            const amountNum = parseFloat(amount);
-            if (isNaN(amountNum) || amountNum <= 0 || amountNum > 150000) {
-                return {
-                    success: false,
-                    error: 'Invalid amount. Must be between 1 and 150,000 KES'
-                };
-            }
-
-            // Generate reference if not provided
-            const transactionRef = reference || `STK${Date.now()}${crypto.randomBytes(2).toString('hex').toUpperCase()}`;
-            
-            // Prepare PayHero STK Push payload
-            const payload = {
-                phone_number: formattedPhone,
-                amount: amountNum.toFixed(2),
-                provider: this.provider,
-                channel_id: this.channelId,
-                external_reference: transactionRef,
-                customer_name: customerName || `Customer-${formattedPhone.slice(-4)}`
-            };
-
-            console.log('🔄 Sending to PayHero:', {
-                phone: formattedPhone,
-                amount: amountNum,
-                reference: transactionRef,
-                channel: this.channelId
-            });
-
-            // Direct PayHero API call
-            const response = await axios.post(
-                `${this.payheroBase}/stk/push`,
-                payload,
-                {
-                    timeout: 30000,
-                    headers: {
-                        'Authorization': this.authToken,
-                        'Content-Type': 'application/json',
-                        'Accept': 'application/json'
-                    }
-                }
-            );
-
-            console.log('✅ PayHero Response:', response.data);
-
-            if (response.data && response.data.request_id) {
-                return {
-                    success: true,
-                    reference: transactionRef,
-                    requestId: response.data.request_id,
-                    message: 'STK Push initiated successfully',
-                    phone: formattedPhone,
-                    amount: amountNum,
-                    provider: this.provider,
-                    timestamp: new Date().toISOString(),
-                    data: response.data
-                };
-            } else {
-                return {
-                    success: false,
-                    error: response.data?.message || 'STK Push failed',
-                    data: response.data
-                };
-            }
-        } catch (error) {
-            console.error('❌ PayHero STK Push error:', error.response?.data || error.message);
-            
-            let errorMessage = 'Payment processing failed';
-            if (error.response) {
-                if (error.response.status === 401) {
-                    errorMessage = 'Authentication failed. Check your AUTH_TOKEN';
-                } else if (error.response.status === 400) {
-                    errorMessage = error.response.data?.message || 'Invalid request parameters';
-                } else if (error.response.status === 403) {
-                    errorMessage = 'Insufficient permissions or account issue';
-                } else if (error.response.data?.message) {
-                    errorMessage = error.response.data.message;
-                }
-            } else if (error.message.includes('timeout')) {
-                errorMessage = 'Payment gateway timeout. Please try again';
-            }
-            
-            return {
-                success: false,
-                error: errorMessage,
-                status: error.response?.status,
-                details: error.response?.data
-            };
-        }
-    }
-
-    async checkTransactionStatus(reference) {
-        try {
-            console.log(`🔍 Checking PayHero transaction: ${reference}`);
-            
-            const response = await axios.get(
-                `${this.payheroBase}/transactions/${reference}`,
-                {
-                    timeout: 15000,
-                    headers: {
-                        'Authorization': this.authToken,
-                        'Accept': 'application/json'
-                    }
-                }
-            );
-
-            console.log('✅ PayHero Status Response:', response.data);
-
-            return {
-                success: true,
-                data: response.data,
-                status: response.data.status,
-                message: response.data.message || 'Transaction found'
-            };
-        } catch (error) {
-            console.error('❌ PayHero status check error:', error.response?.data || error.message);
-            
-            return {
-                success: false,
-                error: error.response?.data?.message || error.message || 'Unable to check status',
-                status: error.response?.status
-            };
-        }
-    }
-
-    async getAccountBalance() {
-        try {
-            const response = await axios.get(
-                `${this.payheroBase}/wallet/balance`,
-                {
-                    timeout: 15000,
-                    headers: {
-                        'Authorization': this.authToken,
-                        'Accept': 'application/json'
-                    }
-                }
-            );
-
-            return {
-                success: true,
-                balance: response.data.balance,
-                currency: response.data.currency || 'KES',
-                data: response.data
-            };
-        } catch (error) {
-            console.error('❌ Balance check error:', error.message);
-            return {
-                success: false,
-                error: error.response?.data?.message || error.message
-            };
-        }
-    }
-}
-
-const stkHandler = new STKPushHandler();
-
-// FIXED BAILEYS IMPORT - Use this exact code
-const baileysImport = require('@whiskeysockets/baileys');
-const {
-    default: makeWASocket,
-    useMultiFileAuthState,
-    delay,
-    makeCacheableSignalKeyStore,
+import {
+    makeWASocket,
     Browsers,
-    jidNormalizedUser,
-    proto,
-    prepareWAMessageMedia,
-    downloadContentFromMessage,
-    getContentType,
-    generateWAMessageFromContent,
-    DisconnectReason,
     fetchLatestBaileysVersion,
-    getAggregateVotesInPollMessage
-} = baileysImport;
+    DisconnectReason,
+    useMultiFileAuthState,
+    getContentType,
+    makeCacheableSignalKeyStore,
+    jidNormalizedUser
+} from '@whiskeysockets/baileys';
+import { Handler, Callupdate, GroupUpdate } from './data/index.js';
+import updateHandler from '../plugins/update.js';
+import express from 'express';
+import pino from 'pino';
+import fs from 'fs';
+import path from 'path';
+import chalk from 'chalk';
+import moment from 'moment-timezone';
+import axios from 'axios';
+import config from './config.cjs';
+import pkg from './lib/autoreact.cjs';
 
-let makeInMemoryStore;
-try {
-    makeInMemoryStore = baileysImport.makeInMemoryStore 
- require('@whiskeysockets/baileys/lib/Store').makeInMemoryStore;
-} catch (e) {
-    console.warn('⚠️ makeInMemoryStore not found, using mock store');
-    makeInMemoryStore = () => ({
-        bind: () => {},
-        loadMessage: async () => undefined,
-        saveMessage: () => {},
-        messages: {},
-        readMessages: () => {},
-        clearMessages: () => {}
-    });
-}
+const { emojis, doReact } = pkg;
+const prefix = process.env.PREFIX || config.PREFIX;
+const sessionName = "session";
+const app = express();
+const orange = chalk.bold.hex("#FFA500");
+const lime = chalk.bold.hex("#32CD32");
+let useQR = false;
+let initialConnection = true;
+const PORT = process.env.PORT || 3000;
 
-// MongoDB Configuration
-const MONGODB_URI = process.env.MONGODB_URI || 'mongodb+srv://ellyongiro8:QwXDXE6tyrGpUTNb@cluster0.tyxcmm9.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0';
+const MAIN_LOGGER = pino({
+    timestamp: () => `,"time":"${new Date().toJSON()}"`
+});
+const logger = MAIN_LOGGER.child({});
+logger.level = "trace";
 
-process.env.NODE_ENV = 'production';
-process.env.PM2_NAME = 'breshyb';
+const msgRetryCounterCache = new NodeCache();
 
-console.log('🚀 Auto Session Manager initialized with MongoDB Atlas');
+const __filename = new URL(import.meta.url).pathname;
+const __dirname = path.dirname(__filename);
 
-const config = {
-    // General Bot Settings
-    AUTO_VIEW_STATUS: 'true',
-    AUTO_LIKE_STATUS: 'true',
-    AUTO_RECORDING: 'true',
-    AUTO_LIKE_EMOJI: ['💗', '🩵', '🥺', '🫶', '😶'],
+const sessionDir = path.join(__dirname, 'session');
 
-    // Command Settings
-    PREFIX: '.',
-    MAX_RETRIES: 3,
-
-    // Group & Channel Settings
-    GROUP_INVITE_LINK: 'https://chat.whatsapp.com/JXaWiMrpjWyJ6Kd2G9FAAq?mode=ems_copy_t',
-
-    // File Paths
-    ADMIN_LIST_PATH: './admin.json',
-    IMAGE_PATH: 'https://i.ibb.co/zhm2RF8j/vision-v.jpg',
-    NUMBER_LIST_PATH: './numbers.json',
-    SESSION_STATUS_PATH: './session_status.json',
-    SESSION_BASE_PATH: './session',
-
-    // Security & OTP
-    OTP_EXPIRY: 300000,
-
-    // News Feed
-    NEWS_JSON_URL: 'https://raw.githubusercontent.com/boychalana9-max/mage/refs/heads/main/main.json?token=GHSAT0AAAAAADJU6UDFFZ67CUOLUQAAWL322F3RI2Q',
-
-    // Owner Details
-    OWNER_NUMBER: '254740007567',
-    TRANSFER_OWNER_NUMBER: '254740007567',
-    
-    // STK Push Settings
-    MIN_STK_AMOUNT: 1,
-    MAX_STK_AMOUNT: 150000,
-    
-    // Auto Session Management for Heroku Dynos
-    AUTO_SAVE_INTERVAL: 300000,
-    AUTO_CLEANUP_INTERVAL: 900000,
-    AUTO_RECONNECT_INTERVAL: 300000,
-    AUTO_RESTORE_INTERVAL: 1800000,
-    MONGODB_SYNC_INTERVAL: 600000,
-    MAX_SESSION_AGE: 604800000,
-    DISCONNECTED_CLEANUP_TIME: 300000,
-    MAX_FAILED_ATTEMPTS: 3,
-    INITIAL_RESTORE_DELAY: 10000,
-    IMMEDIATE_DELETE_DELAY: 60000
-};
-
-// Session Management Maps
+// Session management variables (from pair.js)
 const activeSockets = new Map();
-const socketCreationTime = new Map();
-const disconnectionTime = new Map();
-const sessionHealth = new Map();
-const reconnectionAttempts = new Map();
-const lastBackupTime = new Map();
-const otpStore = new Map();
-const pendingSaves = new Map();
-const restoringNumbers = new Set();
 const sessionConnectionStatus = new Map();
-const stores = new Map();
+const sessionHealth = new Map();
+const disconnectionTime = new Map();
+const reconnectionAttempts = new Map();
 
-// Auto-management intervals
-let autoSaveInterval;
-let autoCleanupInterval;
-let autoReconnectInterval;
-let autoRestoreInterval;
-let mongoSyncInterval;
-
-// MongoDB Connection
-let mongoConnected = false;
-
-// MongoDB Schemas
-const sessionSchema = new mongoose.Schema({
-    number: { type: String, required: true, unique: true, index: true },
-    sessionData: { type: Object, required: true },
-    status: { type: String, default: 'active', index: true },
-    createdAt: { type: Date, default: Date.now },
-    updatedAt: { type: Date, default: Date.now },
-    lastActive: { type: Date, default: Date.now },
-    health: { type: String, default: 'active' }
-});
-
-const userConfigSchema = new mongoose.Schema({
-    number: { type: String, required: true, unique: true, index: true },
-    config: { type: Object, required: true },
-    createdAt: { type: Date, default: Date.now },
-    updatedAt: { type: Date, default: Date.now }
-});
-
-const Session = mongoose.model('Session', sessionSchema);
-const UserConfig = mongoose.model('UserConfig', userConfigSchema);
-
-// Initialize MongoDB Connection
-async function initializeMongoDB() {
-    try {
-        if (mongoConnected) return true;
-
-        await mongoose.connect(MONGODB_URI, {
-            serverSelectionTimeoutMS: 30000,
-            socketTimeoutMS: 45000,
-            maxPoolSize: 10,
-            minPoolSize: 5
-        });
-
-        mongoConnected = true;
-        console.log('✅ MongoDB Atlas connected successfully');
-
-        await Session.createIndexes().catch(err => console.error('Index creation error:', err));
-        await UserConfig.createIndexes().catch(err => console.error('Index creation error:', err));
-
-        return true;
-    } catch (error) {
-        console.error('❌ MongoDB connection error:', error.message);
-        mongoConnected = false;
-
-        setTimeout(() => {
-            initializeMongoDB();
-        }, 5000);
-
-        return false;
-    }
+if (!fs.existsSync(sessionDir)) {
+    fs.mkdirSync(sessionDir, { recursive: true });
 }
 
-// MongoDB Session Management Functions
-async function saveSessionToMongoDB(number, sessionData) {
-    try {
-        const sanitizedNumber = number.replace(/[^0-9]/g, '');
-
-        if (!isSessionActive(sanitizedNumber)) {
-            console.log(`⏭️ Not saving inactive session to MongoDB: ${sanitizedNumber}`);
-            return false;
-        }
-
-        if (!validateSessionData(sessionData)) {
-            console.warn(`⚠️ Invalid session data, not saving to MongoDB: ${sanitizedNumber}`);
-            return false;
-        }
-
-        await Session.findOneAndUpdate(
-            { number: sanitizedNumber },
-            {
-                sessionData: sessionData,
-                status: 'active',
-                updatedAt: new Date(),
-                lastActive: new Date(),
-                health: sessionHealth.get(sanitizedNumber) || 'active'
-            },
-            { upsert: true, new: true }
-        );
-
-        console.log(`✅ Session saved to MongoDB: ${sanitizedNumber}`);
-        return true;
-    } catch (error) {
-        console.error(`❌ MongoDB save failed for ${number}:`, error.message);
-        pendingSaves.set(number, {
-            data: sessionData,
-            timestamp: Date.now()
-        });
-        return false;
-    }
+// Helper functions from pair.js
+async function delay(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
 }
-
-async function loadSessionFromMongoDB(number) {
-    try {
-        const sanitizedNumber = number.replace(/[^0-9]/g, '');
-
-        const session = await Session.findOne({ 
-            number: sanitizedNumber,
-            status: { $ne: 'deleted' }
-        });
-
-        if (session) {
-            console.log(`✅ Session loaded from MongoDB: ${sanitizedNumber}`);
-            return session.sessionData;
-        }
-
-        return null;
-    } catch (error) {
-        console.error(`❌ MongoDB load failed for ${number}:`, error.message);
-        return null;
-    }
-}
-
-async function deleteSessionFromMongoDB(number) {
-    try {
-        const sanitizedNumber = number.replace(/[^0-9]/g, '');
-
-        await Session.deleteOne({ number: sanitizedNumber });
-        await UserConfig.deleteOne({ number: sanitizedNumber });
-
-        console.log(`🗑️ Session deleted from MongoDB: ${sanitizedNumber}`);
-        return true;
-    } catch (error) {
-        console.error(`❌ MongoDB delete failed for ${number}:`, error.message);
-        return false;
-    }
-}
-
-async function getAllActiveSessionsFromMongoDB() {
-    try {
-        const sessions = await Session.find({ 
-            status: 'active',
-            health: { $ne: 'invalid' }
-        });
-
-        console.log(`📊 Found ${sessions.length} active sessions in MongoDB`);
-        return sessions;
-    } catch (error) {
-        console.error('❌ Failed to get sessions from MongoDB:', error.message);
-        return [];
-    }
-}
-
-async function updateSessionStatusInMongoDB(number, status, health = null) {
-    try {
-        const sanitizedNumber = number.replace(/[^0-9]/g, '');
-
-        const updateData = {
-            status: status,
-            updatedAt: new Date()
-        };
-
-        if (health) {
-            updateData.health = health;
-        }
-
-        if (status === 'active') {
-            updateData.lastActive = new Date();
-        }
-
-        await Session.findOneAndUpdate(
-            { number: sanitizedNumber },
-            updateData,
-            { upsert: false }
-        );
-
-        console.log(`📝 Session status updated in MongoDB: ${sanitizedNumber} -> ${status}`);
-        return true;
-    } catch (error) {
-        console.error(`❌ MongoDB status update failed for ${number}:`, error.message);
-        return false;
-    }
-}
-
-async function cleanupInactiveSessionsFromMongoDB() {
-    try {
-        const result = await Session.deleteMany({
-            $or: [
-                { status: 'disconnected' },
-                { status: 'invalid' },
-                { status: 'failed' },
-                { status: 'bad_mac_cleared' },
-                { health: 'invalid' },
-                { health: 'disconnected' },
-                { health: 'bad_mac_cleared' }
-            ]
-        });
-
-        console.log(`🧹 Cleaned ${result.deletedCount} inactive sessions from MongoDB`);
-        return result.deletedCount;
-    } catch (error) {
-        console.error('❌ MongoDB cleanup failed:', error.message);
-        return 0;
-    }
-}
-
-async function getMongoSessionCount() {
-    try {
-        const count = await Session.countDocuments({ status: 'active' });
-        return count;
-    } catch (error) {
-        console.error('❌ Failed to count MongoDB sessions:', error.message);
-        return 0;
-    }
-}
-
-// User Config MongoDB Functions
-async function saveUserConfigToMongoDB(number, configData) {
-    try {
-        const sanitizedNumber = number.replace(/[^0-9]/g, '');
-
-        await UserConfig.findOneAndUpdate(
-            { number: sanitizedNumber },
-            {
-                config: configData,
-                updatedAt: new Date()
-            },
-            { upsert: true, new: true }
-        );
-
-        console.log(`✅ User config saved to MongoDB: ${sanitizedNumber}`);
-        return true;
-    } catch (error) {
-        console.error(`❌ MongoDB config save failed for ${number}:`, error.message);
-        return false;
-    }
-}
-
-async function loadUserConfigFromMongoDB(number) {
-    try {
-        const sanitizedNumber = number.replace(/[^0-9]/g, '');
-
-        const userConfig = await UserConfig.findOne({ number: sanitizedNumber });
-
-        if (userConfig) {
-            console.log(`✅ User config loaded from MongoDB: ${sanitizedNumber}`);
-            return userConfig.config;
-        }
-
-        return null;
-    } catch (error) {
-        console.error(`❌ MongoDB config load failed for ${number}:`, error.message);
-        return null;
-    }
-}
-
-// Create necessary directories
-function initializeDirectories() {
-    const dirs = [
-        config.SESSION_BASE_PATH,
-        './temp'
-    ];
-
-    dirs.forEach(dir => {
-        if (!fs.existsSync(dir)) {
-            fs.mkdirSync(dir, { recursive: true });
-            console.log(`📁 Created directory: ${dir}`);
-        }
-    });
-}
-
-initializeDirectories();
-
-// **HELPER FUNCTIONS WITH BAD MAC FIXES**
-
-// Session validation function
-async function validateSessionData(sessionData) {
-    try {
-        if (!sessionData || typeof sessionData !== 'object') {
-            return false;
-        }
-
-        if (!sessionData.me || !sessionData.myAppStateKeyId) {
-            return false;
-        }
-
-        const requiredFields = ['noiseKey', 'signedIdentityKey', 'signedPreKey', 'registrationId'];
-        for (const field of requiredFields) {
-            if (!sessionData[field]) {
-                console.warn(`⚠️ Missing required field: ${field}`);
-                return false;
-            }
-        }
-
-        return true;
-    } catch (error) {
-        console.error('❌ Session validation error:', error);
-        return false;
-    }
-}
-
-// Handle Bad MAC errors
-async function handleBadMacError(number) {
-    const sanitizedNumber = number.replace(/[^0-9]/g, '');
-    console.log(`🔧 Handling Bad MAC error for ${sanitizedNumber}`);
-
-    try {
-        if (activeSockets.has(sanitizedNumber)) {
-            const socket = activeSockets.get(sanitizedNumber);
-            try {
-                if (socket?.ws) {
-                    socket.ws.close();
-                } else if (socket?.end) {
-                    socket.end();
-                } else if (socket?.logout) {
-                    await socket.logout();
-                }
-            } catch (e) {
-                console.error('Error closing socket:', e.message);
-            }
-            activeSockets.delete(sanitizedNumber);
-        }
-
-        if (stores.has(sanitizedNumber)) {
-            stores.delete(sanitizedNumber);
-        }
-
-        const sessionPath = path.join(config.SESSION_BASE_PATH, `session_${sanitizedNumber}`);
-        if (fs.existsSync(sessionPath)) {
-            console.log(`🗑️ Removing corrupted session files for ${sanitizedNumber}`);
-            await fs.remove(sessionPath);
-        }
-
-        await deleteSessionFromMongoDB(sanitizedNumber);
-
-        sessionHealth.set(sanitizedNumber, 'bad_mac_cleared');
-        reconnectionAttempts.delete(sanitizedNumber);
-        disconnectionTime.delete(sanitizedNumber);
-        sessionConnectionStatus.delete(sanitizedNumber);
-        pendingSaves.delete(sanitizedNumber);
-        lastBackupTime.delete(sanitizedNumber);
-        restoringNumbers.delete(sanitizedNumber);
-
-        await updateSessionStatus(sanitizedNumber, 'bad_mac_cleared', new Date().toISOString());
-
-        console.log(`✅ Cleared Bad MAC session for ${sanitizedNumber}`);
-        return true;
-    } catch (error) {
-        console.error(`❌ Failed to handle Bad MAC for ${sanitizedNumber}:`, error);
-        return false;
-    }
-}
-
-async function downloadAndSaveMedia(message, mediaType) {
-    try {
-        const stream = await downloadContentFromMessage(message, mediaType);
-        let buffer = Buffer.from([]);
-
-        for await (const chunk of stream) {
-            buffer = Buffer.concat([buffer, chunk]);
-        }
-
-        return buffer;
-    } catch (error) {
-        console.error('Download Media Error:', error);
-        throw error;
-    }
-}
-
-// Check if command is from owner
-function isOwner(sender) {
-    const senderNumber = sender.replace('@s.whatsapp.net', '').replace(/[^0-9]/g, '');
-    const ownerNumber = config.OWNER_NUMBER.replace(/[^0-9]/g, '');
-    return senderNumber === ownerNumber;
-}
-
-// **SESSION MANAGEMENT**
 
 function isSessionActive(number) {
     const sanitizedNumber = number.replace(/[^0-9]/g, '');
@@ -733,564 +77,10 @@ function isSessionActive(number) {
     );
 }
 
-// Check if socket is ready for operations
-function isSocketReady(socket) {
-    if (!socket) return false;
-    return socket.ws && socket.ws.readyState === socket.ws.OPEN;
-}
-
-async function saveSessionLocally(number, sessionData) {
-    try {
-        const sanitizedNumber = number.replace(/[^0-9]/g, '');
-
-        if (!isSessionActive(sanitizedNumber)) {
-            console.log(`⏭️ Skipping local save for inactive session: ${sanitizedNumber}`);
-            return false;
-        }
-
-        if (!validateSessionData(sessionData)) {
-            console.warn(`⚠️ Invalid session data, not saving locally: ${sanitizedNumber}`);
-            return false;
-        }
-
-        const sessionPath = path.join(config.SESSION_BASE_PATH, `session_${sanitizedNumber}`);
-
-        await fs.ensureDir(sessionPath);
-
-        await fs.writeFile(
-            path.join(sessionPath, 'creds.json'),
-            JSON.stringify(sessionData, null, 2)
-        );
-
-        console.log(`💾 Active session saved locally: ${sanitizedNumber}`);
-        return true;
-    } catch (error) {
-        console.error(`❌ Failed to save session locally for ${number}:`, error);
-        return false;
-    }
-}
-
-async function restoreSession(number) {
-    try {
-        const sanitizedNumber = number.replace(/[^0-9]/g, '');
-
-        const sessionData = await loadSessionFromMongoDB(sanitizedNumber);
-
-        if (sessionData) {
-            if (!validateSessionData(sessionData)) {
-                console.warn(`⚠️ Invalid session data for ${sanitizedNumber}, clearing...`);
-                await handleBadMacError(sanitizedNumber);
-                return null;
-            }
-
-            await saveSessionLocally(sanitizedNumber, sessionData);
-            console.log(`✅ Restored valid session from MongoDB: ${sanitizedNumber}`);
-            return sessionData;
-        }
-
-        return null;
-    } catch (error) {
-        console.error(`❌ Session restore failed for ${number}:`, error.message);
-
-        if (error.message?.includes('MAC') || error.message?.includes('decrypt')) {
-            await handleBadMacError(number);
-        }
-
-        return null;
-    }
-}
-
-async function deleteSessionImmediately(number) {
-    const sanitizedNumber = number.replace(/[^0-9]/g, '');
-
-    console.log(`🗑️ Immediately deleting inactive/invalid session: ${sanitizedNumber}`);
-
-    if (activeSockets.has(sanitizedNumber)) {
-        const socket = activeSockets.get(sanitizedNumber);
-        try {
-            if (socket?.ws) {
-                socket.ws.close();
-            } else if (socket?.end) {
-                socket.end();
-            } else if (socket?.logout) {
-                await socket.logout();
-            }
-        } catch (e) {
-            console.error('Error closing socket:', e.message);
-        }
-    }
-
-    const sessionPath = path.join(config.SESSION_BASE_PATH, `session_${sanitizedNumber}`);
-    if (fs.existsSync(sessionPath)) {
-        await fs.remove(sessionPath);
-        console.log(`🗑️ Deleted session directory: ${sanitizedNumber}`);
-    }
-
-    await deleteSessionFromMongoDB(sanitizedNumber);
-
-    pendingSaves.delete(sanitizedNumber);
-    sessionConnectionStatus.delete(sanitizedNumber);
-    disconnectionTime.delete(sanitizedNumber);
-    sessionHealth.delete(sanitizedNumber);
-    reconnectionAttempts.delete(sanitizedNumber);
-    socketCreationTime.delete(sanitizedNumber);
-    lastBackupTime.delete(sanitizedNumber);
-    restoringNumbers.delete(sanitizedNumber);
-    activeSockets.delete(sanitizedNumber);
-    stores.delete(sanitizedNumber);
-
-    await updateSessionStatus(sanitizedNumber, 'deleted', new Date().toISOString());
-
-    console.log(`✅ Successfully deleted all data for inactive session: ${sanitizedNumber}`);
-}
-
-// **AUTO MANAGEMENT FUNCTIONS**
-
-function initializeAutoManagement() {
-    console.log('🔄 Starting optimized auto management with MongoDB...');
-
-    initializeMongoDB().then(() => {
-        setTimeout(async () => {
-            console.log('🔄 Initial auto-restore on startup...');
-            await autoRestoreAllSessions();
-        }, config.INITIAL_RESTORE_DELAY);
-    });
-
-    autoSaveInterval = setInterval(async () => {
-        console.log('💾 Auto-saving active sessions...');
-        await autoSaveAllActiveSessions();
-    }, config.AUTO_SAVE_INTERVAL);
-
-    mongoSyncInterval = setInterval(async () => {
-        console.log('🔄 Syncing active sessions with MongoDB...');
-        await syncPendingSavesToMongoDB();
-    }, config.MONGODB_SYNC_INTERVAL);
-
-    autoCleanupInterval = setInterval(async () => {
-        console.log('🧹 Auto-cleaning inactive sessions...');
-        await autoCleanupInactiveSessions();
-    }, config.AUTO_CLEANUP_INTERVAL);
-
-    autoReconnectInterval = setInterval(async () => {
-        console.log('🔗 Auto-checking reconnections...');
-        await autoReconnectFailedSessions();
-    }, config.AUTO_RECONNECT_INTERVAL);
-
-    autoRestoreInterval = setInterval(async () => {
-        console.log('🔄 Hourly auto-restore check...');
-        await autoRestoreAllSessions();
-    }, config.AUTO_RESTORE_INTERVAL);
-}
-
-async function syncPendingSavesToMongoDB() {
-    if (pendingSaves.size === 0) {
-        console.log('✅ No pending saves to sync with MongoDB');
-        return;
-    }
-
-    console.log(`🔄 Syncing ${pendingSaves.size} pending saves to MongoDB...`);
-    let successCount = 0;
-    let failCount = 0;
-
-    for (const [number, sessionInfo] of pendingSaves) {
-        if (!isSessionActive(number)) {
-            console.log(`⏭️ Session became inactive, skipping: ${number}`);
-            pendingSaves.delete(number);
-            continue;
-        }
-
-        try {
-            const success = await saveSessionToMongoDB(number, sessionInfo.data);
-            if (success) {
-                pendingSaves.delete(number);
-                successCount++;
-            } else {
-                failCount++;
-            }
-            await delay(500);
-        } catch (error) {
-            console.error(`❌ Failed to save ${number} to MongoDB:`, error.message);
-            failCount++;
-        }
-    }
-
-    console.log(`✅ MongoDB sync completed: ${successCount} saved, ${failCount} failed, ${pendingSaves.size} pending`);
-}
-
-async function autoSaveAllActiveSessions() {
-    try {
-        let savedCount = 0;
-        let skippedCount = 0;
-
-        for (const [number, socket] of activeSockets) {
-            if (isSessionActive(number)) {
-                const success = await autoSaveSession(number);
-                if (success) {
-                    savedCount++;
-                } else {
-                    skippedCount++;
-                }
-            } else {
-                console.log(`⏭️ Skipping save for inactive session: ${number}`);
-                skippedCount++;
-                await deleteSessionImmediately(number);
-            }
-        }
-
-        console.log(`✅ Auto-save completed: ${savedCount} active saved, ${skippedCount} skipped/deleted`);
-    } catch (error) {
-        console.error('❌ Auto-save all sessions failed:', error);
-    }
-}
-
-async function autoSaveSession(number) {
-    try {
-        const sanitizedNumber = number.replace(/[^0-9]/g, '');
-
-        if (!isSessionActive(sanitizedNumber)) {
-            console.log(`⏭️ Not saving inactive session: ${sanitizedNumber}`);
-            return false;
-        }
-
-        const sessionPath = path.join(config.SESSION_BASE_PATH, `session_${sanitizedNumber}`);
-        const credsPath = path.join(sessionPath, 'creds.json');
-
-        if (fs.existsSync(credsPath)) {
-            const fileContent = await fs.readFile(credsPath, 'utf8');
-            const credData = JSON.parse(fileContent);
-
-            if (!validateSessionData(credData)) {
-                console.warn(`⚠️ Invalid session data during auto-save: ${sanitizedNumber}`);
-                await handleBadMacError(sanitizedNumber);
-                return false;
-            }
-
-            await saveSessionToMongoDB(sanitizedNumber, credData);
-
-            await updateSessionStatusInMongoDB(sanitizedNumber, 'active', 'active');
-            await updateSessionStatus(sanitizedNumber, 'active', new Date().toISOString());
-
-            return true;
-        }
-        return false;
-    } catch (error) {
-        console.error(`❌ Failed to auto-save session for ${number}:`, error);
-
-        if (error.message?.includes('MAC') || error.message?.includes('decrypt')) {
-            await handleBadMacError(number);
-        }
-
-        return false;
-    }
-}
-
-async function autoCleanupInactiveSessions() {
-    try {
-        const sessionStatus = await loadSessionStatus();
-        let cleanedCount = 0;
-
-        for (const [number, socket] of activeSockets) {
-            const isActive = isSessionActive(number);
-            const status = sessionStatus[number]?.status || 'unknown';
-            const disconnectedTimeValue = disconnectionTime.get(number);
-
-            const shouldDelete =
-                !isActive ||
-                (disconnectedTimeValue && (Date.now() - disconnectedTimeValue > config.DISCONNECTED_CLEANUP_TIME)) ||
-                ['failed', 'invalid', 'max_attempts_reached', 'deleted', 'disconnected', 'bad_mac_cleared'].includes(status);
-
-            if (shouldDelete) {
-                await deleteSessionImmediately(number);
-                cleanedCount++;
-            }
-        }
-
-        const mongoCleanedCount = await cleanupInactiveSessionsFromMongoDB();
-        cleanedCount += mongoCleanedCount;
-
-        console.log(`✅ Auto-cleanup completed: ${cleanedCount} inactive sessions cleaned`);
-    } catch (error) {
-        console.error('❌ Auto-cleanup failed:', error);
-    }
-}
-
-async function autoReconnectFailedSessions() {
-    try {
-        const sessionStatus = await loadSessionStatus();
-        let reconnectCount = 0;
-
-        for (const [number, status] of Object.entries(sessionStatus)) {
-            if (status.status === 'failed' && !activeSockets.has(number) && !restoringNumbers.has(number)) {
-                const attempts = reconnectionAttempts.get(number) || 0;
-                const disconnectedTimeValue = disconnectionTime.get(number);
-
-                if (disconnectedTimeValue && (Date.now() - disconnectedTimeValue > config.DISCONNECTED_CLEANUP_TIME)) {
-                    console.log(`⏭️ Deleting long-disconnected session: ${number}`);
-                    await deleteSessionImmediately(number);
-                    continue;
-                }
-
-                if (attempts < config.MAX_FAILED_ATTEMPTS) {
-                    console.log(`🔄 Auto-reconnecting ${number} (attempt ${attempts + 1})`);
-                    reconnectionAttempts.set(number, attempts + 1);
-                    restoringNumbers.add(number);
-
-                    const mockRes = {
-                        headersSent: false,
-                        send: () => { },
-                        status: () => mockRes
-                    };
-
-                    await EmpirePair(number, mockRes);
-                    reconnectCount++;
-                    await delay(5000);
-                } else {
-                    console.log(`❌ Max reconnection attempts reached, deleting ${number}`);
-                    await deleteSessionImmediately(number);
-                }
-            }
-        }
-
-        console.log(`✅ Auto-reconnect completed: ${reconnectCount} sessions reconnected`);
-    } catch (error) {
-        console.error('❌ Auto-reconnect failed:', error);
-    }
-}
-
-async function autoRestoreAllSessions() {
-    try {
-        if (!mongoConnected) {
-            console.log('⚠️ MongoDB not connected, skipping auto-restore');
-            return { restored: [], failed: [] };
-        }
-
-        console.log('🔄 Starting auto-restore process from MongoDB...');
-        const restoredSessions = [];
-        const failedSessions = [];
-
-        const mongoSessions = await getAllActiveSessionsFromMongoDB();
-
-        for (const session of mongoSessions) {
-            const number = session.number;
-
-            if (activeSockets.has(number) || restoringNumbers.has(number)) {
-                continue;
-            }
-
-            try {
-                console.log(`🔄 Restoring session from MongoDB: ${number}`);
-                restoringNumbers.add(number);
-
-                if (!validateSessionData(session.sessionData)) {
-                    console.warn(`⚠️ Invalid session data in MongoDB, clearing: ${number}`);
-                    await handleBadMacError(number);
-                    failedSessions.push(number);
-                    continue;
-                }
-
-                await saveSessionLocally(number, session.sessionData);
-
-                const mockRes = {
-                    headersSent: false,
-                    send: () => { },
-                    status: () => mockRes
-                };
-
-                await EmpirePair(number, mockRes);
-                restoredSessions.push(number);
-
-                await delay(3000);
-            } catch (error) {
-                console.error(`❌ Failed to restore session ${number}:`, error.message);
-                failedSessions.push(number);
-                restoringNumbers.delete(number);
-
-                if (error.message?.includes('MAC') || error.message?.includes('decrypt')) {
-                    await handleBadMacError(number);
-                } else {
-                    await updateSessionStatusInMongoDB(number, 'failed', 'disconnected');
-                }
-            }
-        }
-
-        console.log(`✅ Auto-restore completed: ${restoredSessions.length} restored, ${failedSessions.length} failed`);
-
-        if (restoredSessions.length > 0) {
-            console.log(`✅ Restored sessions: ${restoredSessions.join(', ')}`);
-        }
-
-        if (failedSessions.length > 0) {
-            console.log(`❌ Failed sessions: ${failedSessions.join(', ')}`);
-        }
-
-        return { restored: restoredSessions, failed: failedSessions };
-    } catch (error) {
-        console.error('❌ Auto-restore failed:', error);
-        return { restored: [], failed: [] };
-    }
-}
-
-async function updateSessionStatus(number, status, timestamp, extra = {}) {
-    try {
-        const sessionStatus = await loadSessionStatus();
-        sessionStatus[number] = {
-            status,
-            timestamp,
-            ...extra
-        };
-        await saveSessionStatus(sessionStatus);
-    } catch (error) {
-        console.error('❌ Failed to update session status:', error);
-    }
-}
-
-async function loadSessionStatus() {
-    try {
-        if (fs.existsSync(config.SESSION_STATUS_PATH)) {
-            return JSON.parse(await fs.readFile(config.SESSION_STATUS_PATH, 'utf8'));
-        }
-        return {};
-    } catch (error) {
-        console.error('❌ Failed to load session status:', error);
-        return {};
-    }
-}
-
-async function saveSessionStatus(sessionStatus) {
-    try {
-        await fs.writeFile(config.SESSION_STATUS_PATH, JSON.stringify(sessionStatus, null, 2));
-    } catch (error) {
-        console.error('❌ Failed to save session status:', error);
-    }
-}
-
-// **USER CONFIG MANAGEMENT**
-
-async function loadUserConfig(number) {
-    try {
-        const sanitizedNumber = number.replace(/[^0-9]/g, '');
-
-        const loadedConfig = await loadUserConfigFromMongoDB(sanitizedNumber);
-
-        if (loadedConfig) {
-            applyConfigSettings(loadedConfig);
-            return loadedConfig;
-        }
-
-        await saveUserConfigToMongoDB(sanitizedNumber, config);
-        return { ...config };
-    } catch (error) {
-        console.warn(`⚠️ No config found for ${number}, using defaults`);
-        return { ...config };
-    }
-}
-
-function applyConfigSettings(loadedConfig) {
-    if (loadedConfig.TRANSFER_OWNER_NUMBER) {
-        config.TRANSFER_OWNER_NUMBER = loadedConfig.TRANSFER_OWNER_NUMBER;
-    }
-}
-
-async function updateUserConfig(number, newConfig) {
-    try {
-        const sanitizedNumber = number.replace(/[^0-9]/g, '');
-
-        if (!isSessionActive(sanitizedNumber)) {
-            console.log(`⏭️ Not saving config for inactive session: ${sanitizedNumber}`);
-            return;
-        }
-
-        await saveUserConfigToMongoDB(sanitizedNumber, newConfig);
-
-        console.log(`✅ Config updated in MongoDB: ${sanitizedNumber}`);
-    } catch (error) {
-        console.error('❌ Failed to update config:', error);
-        throw error;
-    }
-}
-
-// **HELPER FUNCTIONS**
-
-function loadAdmins() {
-    try {
-        if (fs.existsSync(config.ADMIN_LIST_PATH)) {
-            return JSON.parse(fs.readFileSync(config.ADMIN_LIST_PATH, 'utf8'));
-        }
-        return [];
-    } catch (error) {
-        console.error('❌ Failed to load admin list:', error);
-        return [];
-    }
-}
-
-function formatMessage(title, content, footer) {
-    return `*${title}*\n\n${content}\n\n> *${footer}*`;
-}
-
-function generateOTP() {
-    return Math.floor(100000 + Math.random() * 900000).toString();
-}
-
-function getSriLankaTimestamp() {
-    return moment().tz('Asia/Colombo').format('YYYY-MM-DD HH:mm:ss');
-}
-
-async function joinGroup(socket) {
-    return;
-}
-
-async function sendAdminConnectMessage(socket, number, groupResult) {
-    const admins = loadAdmins();
-    const groupStatus = groupResult?.status === 'success'
-        ? `Joined (ID: ${groupResult.gid})`
-        : `Failed to join group: ${groupResult?.error || 'Unknown error'}`;
-
-    const caption = formatMessage(
-        'mᥱrᥴᥱძᥱs mіᥒі ᥴ᥆ᥒᥒᥱᥴ𝗍ᥱძ',
-        `Connect - https://up-tlm1.onrender.com/\n📞 Number: ${number}\n🟢 Status: Auto-Connected\n📋 Group: ${groupStatus}\n⏰ Time: ${getSriLankaTimestamp()}`,
-        'mᥱrᥴᥱძᥱs mіᥒі ᥆ᥒᥣіᥒᥱ'
-    );
-
-    for (const admin of admins) {
-        try {
-            await socket.sendMessage(
-                `${admin}@s.whatsapp.net`,
-                {
-                    image: { url: config.IMAGE_PATH },
-                    caption
-                }
-            );
-        } catch (error) {
-            console.error(`❌ Failed to send admin message to ${admin}:`, error);
-        }
-    }
-}
-
-async function handleUnknownContact(socket, number, messageJid) {
-    return;
-}
-
-async function sendOTP(socket, number, otp) {
-    const userJid = jidNormalizedUser(socket.user.id);
-    const message = formatMessage(
-        '🔐 AUTO OTP VERIFICATION',
-        `Your OTP for config update is: *${otp}*\nThis OTP will expire in 5 minutes.`,
-        'mᥱrᥴᥱძᥱs mіᥒі'
-    );
-
-    try {
-        await socket.sendMessage(userJid, { text: message });
-        console.log(`📱 Auto-sent OTP to ${number}`);
-    } catch (error) {
-        console.error(`❌ Failed to send OTP to ${number}:`, error);
-        throw error;
-    }
-}
-
 async function updateAboutStatus(socket) {
     const aboutStatus = 'mᥱrᥴᥱძᥱs ᥲᥴ𝗍і᥎ᥱ:- https://up-tlm1.onrender.com/';
     try {
-        if (isSocketReady(socket)) {
+        if (socket?.ws?.readyState === socket?.ws?.OPEN) {
             await socket.updateProfileStatus(aboutStatus);
             console.log(`✅ Auto-updated About status`);
         } else {
@@ -1301,679 +91,90 @@ async function updateAboutStatus(socket) {
     }
 }
 
-async function updateStoryStatus(socket) {
-    return;
-}
-
-// **MEDIA FUNCTIONS**
-
-async function resize(image, width, height) {
-    let oyy = await Jimp.read(image);
-    let kiyomasa = await oyy.resize(width, height).getBufferAsync(Jimp.MIME_JPEG);
-    return kiyomasa;
-}
-
-function capital(string) {
-    return string.charAt(0).toUpperCase() + string.slice(1);
-}
-
-const createSerial = (size) => {
-    return crypto.randomBytes(size).toString('hex').slice(0, size);
-}
-
-const myquoted = {
-    key: {
-        remoteJid: 'status@broadcast',
-        participant: '254740007567@s.whatsapp.net',
-        fromMe: false,
-        id: createSerial(16).toUpperCase()
-    },
-    message: {
-        contactMessage: {
-            displayName: "ᴍᴇʀᴄᴇᴅᴇs ᴍɪɴɪ",
-            vcard: `BEGIN:VCARD\nVERSION:3.0\nFN:Marisel\nORG:ᴍᴇʀᴄᴇᴅᴇs ᴍɪɴɪ;\nTEL;type=CELL;type=VOICE;waid=254740007567:254740007567\nEND:VCARD`,
-            contextInfo: {
-                stanzaId: createSerial(16).toUpperCase(),
-                participant: "0@s.whatsapp.net",
-                quotedMessage: {
-                    conversation: "mᥱrᥴᥱძᥱs mіᥒі"
-                }
-            }
-        }
-    },
-    messageTimestamp: Math.floor(Date.now() / 1000),
-    status: 1,
-    verifiedBizName: "Meta"
-};
-
-async function SendSlide(socket, jid, newsItems) {
-    let anu = [];
-    for (let item of newsItems) {
-        let imgBuffer;
-        try {
-            imgBuffer = await resize(item.thumbnail, 300, 200);
-        } catch (error) {
-            console.error(`❌ Failed to resize image for ${item.title}:`, error);
-            imgBuffer = await Jimp.read('https://i.ibb.co/zhm2RF8j/vision-v.jpg');
-            imgBuffer = await imgBuffer.resize(300, 200).getBufferAsync(Jimp.MIME_JPEG);
-        }
-        let imgsc = await prepareWAMessageMedia({ image: imgBuffer }, { upload: socket.waUploadToServer });
-        anu.push({
-            body: proto.Message.InteractiveMessage.Body.fromObject({
-                text: `*${capital(item.title)}*\n\n${item.body}`
-            }),
-            header: proto.Message.InteractiveMessage.Header.fromObject({
-                hasMediaAttachment: true,
-                ...imgsc
-            }),
-            nativeFlowMessage: proto.Message.InteractiveMessage.NativeFlowMessage.fromObject({
-                buttons: [
-                    {
-                        name: "cta_url",
-                        buttonParamsJson: `{"display_text":"ᴅᴇᴘʟᴏʏ","url":"https:/","merchant_url":"https://www.google.com"}`
-                    },
-                    {
-                        name: "cta_url",
-                        buttonParamsJson: `{"display_text":"ᴄᴏɴᴛᴀᴄᴛ","url":"https","merchant_url":"https://www.google.com"}`
-                    }
-                ]
-            })
-        });
-    }
-    const msgii = await generateWAMessageFromContent(jid, {
-        viewOnceMessage: {
-            message: {
-                messageContextInfo: {
-                    deviceListMetadata: {},
-                    deviceListMetadataVersion: 2
-                },
-                interactiveMessage: proto.Message.InteractiveMessage.fromObject({
-                    body: proto.Message.InteractiveMessage.Body.fromObject({
-                        text: "*AUTO NEWS UPDATES"
-                    }),
-                    carouselMessage: proto.Message.InteractiveMessage.CarouselMessage.fromObject({
-                        cards: anu
-                    })
-                })
-            }
-        }
-    }, { userJid: jid });
-    return socket.relayMessage(jid, msgii.message, {
-        messageId: msgii.key.id
-    });
-}
-
-async function fetchNews() {
+async function updateSessionStatus(number, status, timestamp) {
     try {
-        const response = await axios.get(config.NEWS_JSON_URL);
-        return response.data || [];
+        const sessionStatusPath = './session_status.json';
+        let sessionStatus = {};
+        
+        if (fs.existsSync(sessionStatusPath)) {
+            sessionStatus = JSON.parse(fs.readFileSync(sessionStatusPath, 'utf8'));
+        }
+        
+        sessionStatus[number] = {
+            status,
+            timestamp
+        };
+        
+        fs.writeFileSync(sessionStatusPath, JSON.stringify(sessionStatus, null, 2));
     } catch (error) {
-        console.error('❌ Failed to fetch news:', error.message);
-        return [];
+        console.error('❌ Failed to update session status:', error);
     }
 }
 
-// **STK PUSH COMMAND HANDLERS**
-
-async function handleSTKCommand(socket, message, args) {
-    try {
-        const m = sms(socket, message);
-        
-        const sender = m.sender.replace('@s.whatsapp.net', '');
-        const isOwner = sender === config.OWNER_NUMBER.replace(/[^0-9]/g, '');
-        
-        const admins = loadAdmins();
-        const isAdmin = admins.includes(sender) || isOwner;
-        
-        if (!isAdmin) {
-            await m.reply(
-                `❌ *Access Denied*\n\n` +
-                `STK Push commands are only available to admins.\n` +
-                `Contact owner for access.\n\n` +
-                `👑 Owner: ${config.OWNER_NUMBER}`
-            );
-            return;
-        }
-
-        if (args.length < 2) {
-            await m.reply(
-                `💳 *STK Push Command*\n\n` +
-                `*Usage:* ${config.PREFIX}stk <phone> <amount>\n` +
-                `*Example:* ${config.PREFIX}stk 254712345678 100\n` +
-                `*Example:* ${config.PREFIX}stk 0712345678 500\n\n` +
-                `*Optional:* ${config.PREFIX}stk <phone> <amount> <reference> <name>\n` +
-                `*Example:* ${config.PREFIX}stk 254712345678 100 ORDER123 John`
-            );
-            return;
-        }
-
-        const [phone, amount, reference, ...nameParts] = args;
-        const customerName = nameParts.length > 0 ? nameParts.join(' ') : null;
-        
-        await m.reply(
-            `🔄 *Processing STK Push Request*\n\n` +
-            `📱 *Phone:* ${phone}\n` +
-            `💰 *Amount:* KES ${amount}\n` +
-            `👤 *Requested by:* ${sender}\n` +
-            `⏰ *Time:* ${getSriLankaTimestamp()}\n\n` +
-            `Please wait while we process your request...`
-        );
-
-        const result = await stkHandler.processSTKPush(phone, amount, reference, customerName);
-
-        if (result.success) {
-            const successMessage = 
-                `✅ *STK Push Initiated Successfully!*\n\n` +
-                `📱 *Phone:* ${result.phone}\n` +
-                `💰 *Amount:* KES ${result.amount}\n` +
-                `📋 *Reference:* ${result.reference}\n` +
-                `🏦 *Provider:* ${result.provider}\n` +
-                `🆔 *Request ID:* ${result.requestId || 'N/A'}\n` +
-                `👤 *Customer:* ${customerName || 'Not specified'}\n` +
-                `⏰ *Time:* ${getSriLankaTimestamp()}\n\n` +
-                `📲 *Instructions:*\n` +
-                `1. Customer will receive M-Pesa prompt\n` +
-                `2. Customer enters M-Pesa PIN\n` +
-                `3. Payment will be processed\n\n` +
-                `🔍 *Check Status:*\n` +
-                `${config.PREFIX}status ${result.reference}\n\n` +
-                `💾 *Save this reference for tracking*`;
-            
-            await m.reply(successMessage);
-            
-            await sendSTKNotificationToAdmins(socket, result, sender);
-        } else {
-            await m.reply(
-                `❌ *STK Push Failed*\n\n` +
-                `*Error:* ${result.error}\n` +
-                `*Phone:* ${phone}\n` +
-                `*Amount:* KES ${amount}\n` +
-                `*Time:* ${getSriLankaTimestamp()}\n\n` +
-                `*Possible Issues:*\n` +
-                `• Invalid phone number format\n` +
-                `• Insufficient account balance\n` +
-                `• Network issues\n` +
-                `• Account restrictions\n\n` +
-                `Please verify details and try again.`
-            );
-        }
-    } catch (error) {
-        console.error('❌ STK Command error:', error);
-        const m = sms(socket, message);
-        await m.reply(
-            `❌ *Error processing STK Push*\n\n` +
-            `${error.message}\n\n` +
-            `Please try again later or contact support.`
-        );
-    }
-}
-
-async function handleSTKStatusCommand(socket, message, args) {
-    try {
-        const m = sms(socket, message);
-        
-        if (args.length < 1) {
-            await m.reply(
-                `📊 *Transaction Status Check*\n\n` +
-                `*Usage:* ${config.PREFIX}status <reference>\n` +
-                `*Example:* ${config.PREFIX}status STK1234567890`
-            );
-            return;
-        }
-
-        const reference = args[0];
-        
-        await m.reply(`🔄 Checking transaction status for: *${reference}*`);
-
-        const result = await stkHandler.checkTransactionStatus(reference);
-
-        if (result.success) {
-            const statusData = result.data;
-            let statusMessage = 
-                `📊 *Transaction Status Report*\n\n` +
-                `📋 *Reference:* ${reference}\n` +
-                `⏰ *Checked:* ${getSriLankaTimestamp()}\n\n`;
-            
-            if (statusData.status) {
-                const statusEmoji = statusData.status.toLowerCase().includes('success') ? '✅' : 
-                                   statusData.status.toLowerCase().includes('fail') ? '❌' : '🔄';
-                statusMessage += `${statusEmoji} *Status:* ${statusData.status}\n`;
-            }
-            if (statusData.amount) {
-                statusMessage += `💰 *Amount:* KES ${statusData.amount}\n`;
-            }
-            if (statusData.phone_number) {
-                statusMessage += `📱 *Phone:* ${statusData.phone_number}\n`;
-            }
-            if (statusData.transaction_date) {
-                statusMessage += `📅 *Date:* ${statusData.transaction_date}\n`;
-            }
-            if (statusData.description) {
-                statusMessage += `📝 *Description:* ${statusData.description}\n`;
-            }
-            
-            if (statusData.request_id) {
-                statusMessage += `🆔 *Request ID:* ${statusData.request_id}\n`;
-            }
-            if (statusData.channel_id) {
-                statusMessage += `🏦 *Channel:* ${statusData.channel_id}\n`;
-            }
-            
-            await m.reply(statusMessage);
-        } else {
-            await m.reply(
-                `❌ *Unable to check status*\n\n` +
-                `*Reference:* ${reference}\n` +
-                `*Error:* ${result.error}\n\n` +
-                `Please verify the reference number and try again.`
-            );
-        }
-    } catch (error) {
-        console.error('❌ STK Status error:', error);
-        const m = sms(socket, message);
-        await m.reply(
-            `❌ *Error checking status*\n\n` +
-            `${error.message}\n\n` +
-            `Please try again later.`
-        );
-    }
-}
-
-async function handleHelpCommand(socket, message, args) {
-    try {
-        const m = sms(socket, message);
-        
-        const helpMessage = 
-            `🤖 *Mercedes Mini Bot - Admin Commands*\n\n` +
-            `*STK Push Commands (Admin Only):*\n` +
-            `• ${config.PREFIX}stk <phone> <amount> - Send STK Push\n` +
-            `• ${config.PREFIX}status <reference> - Check transaction status\n` +
-            `• ${config.PREFIX}balance - Check account balance\n\n` +
-            `*Utility Commands:*\n` +
-            `• ${config.PREFIX}help - Show this help\n` +
-            `• ${config.PREFIX}test - Check bot status\n\n` +
-            `*Examples:*\n` +
-            `${config.PREFIX}stk 254712345678 100\n` +
-            `${config.PREFIX}stk 0712345678 500 ORDER123\n` +
-            `${config.PREFIX}status STK1234567890\n\n` +
-            `*Auto Features:*\n` +
-            `✅ Auto-view status\n` +
-            `✅ Auto-like status\n` +
-            `✅ Auto-recording\n` +
-            `✅ Auto-session management\n\n` +
-            `👑 *Owner:* ${config.OWNER_NUMBER}\n` +
-            `🏦 *Channel ID:* ${stkHandler.channelId}`;
-        
-        await m.reply(helpMessage);
-    } catch (error) {
-        console.error('❌ Help command error:', error);
-    }
-}
-
-async function handleBalanceCommand(socket, message, args) {
-    try {
-        const m = sms(socket, message);
-        
-        const sender = m.sender.replace('@s.whatsapp.net', '');
-        const isOwner = sender === config.OWNER_NUMBER.replace(/[^0-9]/g, '');
-        
-        if (!isOwner) {
-            await m.reply(
-                `❌ *Access Denied*\n\n` +
-                `Balance check is only available to the owner.\n` +
-                `👑 Owner: ${config.OWNER_NUMBER}`
-            );
-            return;
-        }
-
-        await m.reply(`🔄 Checking PayHero account balance...`);
-
-        const result = await stkHandler.getAccountBalance();
-
-        if (result.success) {
-            await m.reply(
-                `💰 *PayHero Account Balance*\n\n` +
-                `🏦 *Channel ID:* ${stkHandler.channelId}\n` +
-                `💵 *Balance:* ${result.balance} ${result.currency}\n` +
-                `⏰ *Checked:* ${getSriLankaTimestamp()}\n\n` +
-                `*Account Status:* ✅ Active`
-            );
-        } else {
-            await m.reply(
-                `❌ *Unable to check balance*\n\n` +
-                `*Error:* ${result.error}\n` +
-                `*Channel ID:* ${stkHandler.channelId}\n\n` +
-                `Please check your PayHero account.`
-            );
-        }
-    } catch (error) {
-        console.error('❌ Balance command error:', error);
-        const m = sms(socket, message);
-        await m.reply(`❌ Error checking balance: ${error.message}`);
-    }
-}
-
-async function sendSTKNotificationToAdmins(socket, stkResult, requester) {
-    try {
-        const admins = loadAdmins();
-        const ownerJid = `${config.OWNER_NUMBER}@s.whatsapp.net`;
-        
-        const notification = 
-            `📢 *New STK Push Request*\n\n` +
-            `👤 *Requested by:* ${requester}\n` +
-            `📱 *Phone:* ${stkResult.phone}\n` +
-            `💰 *Amount:* KES ${stkResult.amount}\n` +
-            `📋 *Reference:* ${stkResult.reference}\n` +
-            `🏦 *Provider:* ${stkResult.provider}\n` +
-            `⏰ *Time:* ${getSriLankaTimestamp()}\n\n` +
-            `✅ *Status:* Initiated\n` +
-            `🆔 *Request ID:* ${stkResult.requestId || 'N/A'}`;
-        
-        await socket.sendMessage(ownerJid, { 
-            text: notification 
-        });
-        
-        for (const admin of admins) {
-            if (admin !== config.OWNER_NUMBER) {
-                try {
-                    await socket.sendMessage(
-                        `${admin}@s.whatsapp.net`,
-                        { text: notification }
-                    );
-                } catch (error) {
-                    console.error(`❌ Failed to notify admin ${admin}:`, error.message);
-                }
-            }
-        }
-    } catch (error) {
-        console.error('❌ Admin notification error:', error);
-    }
-}
-
-// **COMMAND HANDLERS WITH STK PUSH**
-function setupCommandHandlers(socket, number) {
-    console.log(`✅ Auto-features enabled for ${number}: Recording, View Status, Like Status`);
-    
+async function handleBadMacError(number) {
     const sanitizedNumber = number.replace(/[^0-9]/g, '');
-    
-    socket.ev.on('messages.upsert', async ({ messages }) => {
-        const msg = messages[0];
-        if (!msg.message || msg.key.remoteJid === 'status@broadcast') return;
-
-        try {
-            const m = sms(socket, msg);
-            
-            let text = '';
-            if (msg.message.conversation) {
-                text = msg.message.conversation;
-            } else if (msg.message.extendedTextMessage?.text) {
-                text = msg.message.extendedTextMessage.text;
-            } else if (msg.message.imageMessage?.caption) {
-                text = msg.message.imageMessage.caption;
-            }
-
-            if (text.startsWith(config.PREFIX)) {
-                const args = text.slice(config.PREFIX.length).trim().split(/ +/);
-                const command = args.shift().toLowerCase();
-                
-                console.log(`📱 Command received from ${sanitizedNumber}: ${command}`, args);
-
-                if (command === 'stk' || command === 'pay' || command === 'mpesa') {
-                    await handleSTKCommand(socket, msg, args);
-                }
-                else if (command === 'status' || command === 'check') {
-                    await handleSTKStatusCommand(socket, msg, args);
-                }
-                else if (command === 'help' || command === 'menu') {
-                    await handleHelpCommand(socket, msg, args);
-                }
-                else if (command === 'balance' || command === 'bal') {
-                    await handleBalanceCommand(socket, msg, args);
-                }
-                else if (command === 'test' || command === 'ping') {
-                    await m.reply(`✅ Mercedes Mini Bot is online!\n📱 Number: ${sanitizedNumber}\n⏰ Time: ${getSriLankaTimestamp()}`);
-                }
-            }
-        } catch (error) {
-            console.error('❌ Command handler error:', error);
-        }
-    });
-}
-
-// **EVENT HANDLERS**
-
-async function setupStatusHandlers(socket) {
-    socket.ev.on('messages.upsert', async ({ messages }) => {
-        const message = messages[0];
-        if (!message?.key || message.key.remoteJid !== 'status@broadcast' || !message.key.participant) return;
-
-        try {
-            if (config.AUTO_RECORDING === 'true' && message.key.remoteJid) {
-                await socket.sendPresenceUpdate("recording", message.key.remoteJid);
-            }
-
-            if (config.AUTO_VIEW_STATUS === 'true') {
-                let retries = config.MAX_RETRIES;
-                while (retries > 0) {
-                    try {
-                        await socket.readMessages([message.key]);
-                        console.log('Auto-viewed status');
-                        break;
-                    } catch (error) {
-                        retries--;
-                        if (retries === 0) throw error;
-                        await delay(1000 * (config.MAX_RETRIES - retries));
-                    }
-                }
-            }
-
-            if (config.AUTO_LIKE_STATUS === 'true') {
-                const randomEmoji = config.AUTO_LIKE_EMOJI[Math.floor(Math.random() * config.AUTO_LIKE_EMOJI.length)];
-                let retries = config.MAX_RETRIES;
-                while (retries > 0) {
-                    try {
-                        await socket.sendMessage(
-                            message.key.remoteJid,
-                            { react: { text: randomEmoji, key: message.key } },
-                            { statusJidList: [message.key.participant] }
-                        );
-                        console.log(`Reacted to status with ${randomEmoji}`);
-                        break;
-                    } catch (error) {
-                        retries--;
-                        console.warn(`Failed to react to status, retries left: ${retries}`, error);
-                        if (retries === 0) throw error;
-                        await delay(1000 * (config.MAX_RETRIES - retries));
-                    }
-                }
-            }
-        } catch (error) {
-            console.error('Status handler error:', error);
-        }
-    });
-}
-
-async function handleMessageRevocation(socket, number) {
-    socket.ev.on('messages.delete', async ({ keys }) => {
-        if (!keys || keys.length === 0) return;
-
-        const messageKey = keys[0];
-        const userJid = jidNormalizedUser(socket.user.id);
-        const deletionTime = getSriLankaTimestamp();
-
-        const message = formatMessage(
-            'ᴀᴜᴛᴏ ᴍᴇssᴀɢᴇ ᴅᴇʟᴇᴛᴇ ᴅᴇᴛᴇᴄᴛᴇᴅ',
-            `ᴍᴇssᴀɢᴇ ᴅᴇᴛᴇᴄᴛᴇᴅ \n📋 ғʀᴏᴍ: ${messageKey.remoteJid}\n🍁 ᴅᴇᴛᴇᴄᴛɪᴏɴ ᴛɪᴍᴇ: ${deletionTime}`,
-            'ᴍᴇʀᴄᴇᴅᴇs ᴍɪɴɪ'
-        );
-
-        try {
-            await socket.sendMessage(userJid, {
-                image: { url: config.IMAGE_PATH },
-                caption: message
-            });
-            console.log(`🗑️ Auto-notified deletion for ${number}`);
-        } catch (error) {
-            console.error('❌ Failed to send deletion notification:', error);
-        }
-    });
-}
-
-function setupMessageHandlers(socket, number) {
-    socket.ev.on('messages.upsert', async ({ messages }) => {
-        const msg = messages[0];
-        if (!msg.message || msg.key.remoteJid === 'status@broadcast') return;
-
-        const sanitizedNumber = number.replace(/[^0-9]/g, '');
-        sessionHealth.set(sanitizedNumber, 'active');
-
-        if (msg.key.remoteJid.endsWith('@s.whatsapp.net')) {
-            await handleUnknownContact(socket, number, msg.key.remoteJid);
-        }
-
-        if (config.AUTO_RECORDING === 'true') {
-            try {
-                await socket.sendPresenceUpdate('recording', msg.key.remoteJid);
-            } catch (error) {
-                console.error('❌ Failed to set recording presence:', error);
-            }
-        }
-    });
-}
-
-function setupAutoRestart(socket, number) {
-    socket.ev.on('connection.update', async (update) => {
-        const { connection, lastDisconnect, qr } = update;
-        const sanitizedNumber = number.replace(/[^0-9]/g, '');
-
-        sessionConnectionStatus.set(sanitizedNumber, connection);
-
-        if (qr) {
-            console.log('QR Code received for:', sanitizedNumber);
-        }
-
-        if (connection === 'close') {
-            const statusCode = lastDisconnect?.error?.output?.statusCode;
-            const errorMessage = lastDisconnect?.error?.message || '';
-            const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
-
-            disconnectionTime.set(sanitizedNumber, Date.now());
-            sessionHealth.set(sanitizedNumber, 'disconnected');
-            sessionConnectionStatus.set(sanitizedNumber, 'closed');
-
-            if (statusCode === DisconnectReason.loggedOut || 
-                statusCode === DisconnectReason.badSession ||
-                errorMessage.includes('Bad MAC') || 
-                errorMessage.includes('bad-mac') || 
-                errorMessage.includes('decrypt')) {
-
-                console.log(`❌ Bad MAC/Invalid session detected for ${number}, cleaning up...`);
-                sessionHealth.set(sanitizedNumber, 'invalid');
-                await updateSessionStatus(sanitizedNumber, 'invalid', new Date().toISOString());
-                await updateSessionStatusInMongoDB(sanitizedNumber, 'invalid', 'invalid');
-
-                setTimeout(async () => {
-                    await handleBadMacError(sanitizedNumber);
-                }, config.IMMEDIATE_DELETE_DELAY);
-            } else if (shouldReconnect) {
-                console.log(`🔄 Connection closed for ${number}, attempting reconnect...`);
-                sessionHealth.set(sanitizedNumber, 'reconnecting');
-                await updateSessionStatus(sanitizedNumber, 'failed', new Date().toISOString(), {
-                    disconnectedAt: new Date().toISOString(),
-                    reason: errorMessage
-                });
-                await updateSessionStatusInMongoDB(sanitizedNumber, 'disconnected', 'reconnecting');
-
-                const attempts = reconnectionAttempts.get(sanitizedNumber) || 0;
-                if (attempts < config.MAX_FAILED_ATTEMPTS) {
-                    await delay(10000);
-                    activeSockets.delete(sanitizedNumber);
-                    stores.delete(sanitizedNumber);
-
-                    const mockRes = { headersSent: false, send: () => { }, status: () => mockRes };
-                    await EmpirePair(number, mockRes);
-                } else {
-                    console.log(`❌ Max reconnection attempts reached for ${number}, deleting...`);
-                    setTimeout(async () => {
-                        await deleteSessionImmediately(sanitizedNumber);
-                    }, config.IMMEDIATE_DELETE_DELAY);
-                }
-            } else {
-                console.log(`❌ Session logged out for ${number}, cleaning up...`);
-                await deleteSessionImmediately(sanitizedNumber);
-            }
-        } else if (connection === 'open') {
-            console.log(`✅ Connection open: ${number}`);
-            sessionHealth.set(sanitizedNumber, 'active');
-            sessionConnectionStatus.set(sanitizedNumber, 'open');
-            reconnectionAttempts.delete(sanitizedNumber);
-            disconnectionTime.delete(sanitizedNumber);
-            await updateSessionStatus(sanitizedNumber, 'active', new Date().toISOString());
-            await updateSessionStatusInMongoDB(sanitizedNumber, 'active', 'active');
-
-            setTimeout(async () => {
-                await autoSaveSession(sanitizedNumber);
-            }, 5000);
-        } else if (connection === 'connecting') {
-            sessionHealth.set(sanitizedNumber, 'connecting');
-            sessionConnectionStatus.set(sanitizedNumber, 'connecting');
-        }
-    });
-}
-
-// **MAIN PAIRING FUNCTION WITH BAD MAC FIXES**
-
-async function EmpirePair(number, res) {
-    const sanitizedNumber = number.replace(/[^0-9]/g, '');
-    const sessionPath = path.join(config.SESSION_BASE_PATH, `session_${sanitizedNumber}`);
-
-    console.log(`🔄 Connecting: ${sanitizedNumber}`);
+    console.log(`🔧 Handling Bad MAC error for ${sanitizedNumber}`);
 
     try {
-        await fs.ensureDir(sessionPath);
-
-        const existingCredsPath = path.join(sessionPath, 'creds.json');
-        if (fs.existsSync(existingCredsPath)) {
+        // Close existing socket if any
+        if (activeSockets.has(sanitizedNumber)) {
+            const socket = activeSockets.get(sanitizedNumber);
             try {
-                const existingCreds = JSON.parse(await fs.readFile(existingCredsPath, 'utf8'));
-                if (!validateSessionData(existingCreds)) {
-                    console.log(`⚠️ Invalid existing session, clearing: ${sanitizedNumber}`);
-                    await handleBadMacError(sanitizedNumber);
+                if (socket?.ws) {
+                    socket.ws.close();
                 }
-            } catch (error) {
-                console.log(`⚠️ Corrupted session file, clearing: ${sanitizedNumber}`);
-                await handleBadMacError(sanitizedNumber);
+            } catch (e) {
+                console.error('Error closing socket:', e.message);
             }
+            activeSockets.delete(sanitizedNumber);
         }
 
-        const restoredCreds = await restoreSession(sanitizedNumber);
-        if (restoredCreds && validateSessionData(restoredCreds)) {
-            await fs.writeFile(
-                path.join(sessionPath, 'creds.json'),
-                JSON.stringify(restoredCreds, null, 2)
-            );
-            console.log(`✅ Session restored: ${sanitizedNumber}`);
+        // Clear session directory
+        const sessionPath = path.join(sessionDir, `session_${sanitizedNumber}`);
+        if (fs.existsSync(sessionPath)) {
+            console.log(`🗑️ Removing corrupted session files for ${sanitizedNumber}`);
+            fs.rmSync(sessionPath, { recursive: true, force: true });
         }
 
-        const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
-        const { version } = await fetchLatestBaileysVersion();
-        const logger = pino({ level: 'silent' });
+        // Clear all references
+        sessionHealth.set(sanitizedNumber, 'bad_mac_cleared');
+        reconnectionAttempts.delete(sanitizedNumber);
+        disconnectionTime.delete(sanitizedNumber);
+        sessionConnectionStatus.delete(sanitizedNumber);
 
+        await updateSessionStatus(sanitizedNumber, 'bad_mac_cleared', new Date().toISOString());
+
+        console.log(`✅ Cleared Bad MAC session for ${sanitizedNumber}`);
+        return true;
+    } catch (error) {
+        console.error(`❌ Failed to handle Bad MAC for ${sanitizedNumber}:`, error);
+        return false;
+    }
+}
+
+// Main connection function adapted from pair.js
+async function createWhatsAppConnection() {
+    try {
+        const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
+        const { version, isLatest } = await fetchLatestBaileysVersion();
+        console.log(`using WA v${version.join('.')}, isLatest: ${isLatest}`);
+
+        // Create store (simplified from pair.js)
         const store = {
             bind: () => {},
             loadMessage: async () => undefined,
             saveMessage: () => {},
             messages: {}
         };
-        
+
         const socket = makeWASocket({
             version,
             auth: {
                 creds: state.creds,
                 keys: makeCacheableSignalKeyStore(state.keys, logger),
             },
-            printQRInTerminal: false,
-            logger,
+            logger: pino({ level: 'silent' }),
+            printQRInTerminal: false, // We'll use pairing code instead
             browser: Browsers.macOS('Safari'),
             connectTimeoutMs: 60000,
             defaultQueryTimeoutMs: 60000,
@@ -1991,532 +192,238 @@ async function EmpirePair(number, res) {
             }
         });
 
+        // Store bind
         store?.bind(socket.ev);
 
+        // Add error handler for Bad MAC
         socket.ev.on('error', async (error) => {
-            console.error(`❌ Socket error for ${sanitizedNumber}:`, error);
+            console.error(`❌ Socket error:`, error);
 
             if (error.message?.includes('Bad MAC') || 
                 error.message?.includes('bad-mac') || 
                 error.message?.includes('decrypt')) {
-
-                console.log(`🔧 Bad MAC detected for ${sanitizedNumber}, cleaning up...`);
-                await handleBadMacError(sanitizedNumber);
-
-                if (!res.headersSent) {
-                    res.status(400).send({
-                        error: 'Session corrupted',
-                        message: 'Session has been cleared. Please try pairing again.',
-                        action: 'retry_pairing'
-                    });
-                }
+                console.log(`🔧 Bad MAC detected, cleaning up session...`);
+                await handleBadMacError('bot');
             }
         });
 
-        socketCreationTime.set(sanitizedNumber, Date.now());
-        sessionHealth.set(sanitizedNumber, 'connecting');
-        sessionConnectionStatus.set(sanitizedNumber, 'connecting');
-
-        setupStatusHandlers(socket);
-        setupCommandHandlers(socket, sanitizedNumber);
-        setupMessageHandlers(socket, sanitizedNumber);
-        setupAutoRestart(socket, sanitizedNumber);
-        handleMessageRevocation(socket, sanitizedNumber);
-
+        // Pairing logic
         if (!socket.authState.creds.registered) {
-            let retries = config.MAX_RETRIES;
+            console.log('📱 Generating pairing code...');
+            let retries = 3;
             let code;
 
             while (retries > 0) {
                 try {
                     await delay(1500);
                     const pair = "MARISELA";
-                    code = await socket.requestPairingCode(sanitizedNumber, pair);
-                    console.log(`📱 Generated pairing code for ${sanitizedNumber}: ${code}`);
+                    code = await socket.requestPairingCode("bot", pair);
+                    console.log(`📱 Generated pairing code: ${code}`);
+                    console.log(`🔗 Please pair your device using this code: ${code}`);
                     break;
                 } catch (error) {
                     retries--;
                     console.warn(`⚠️ Pairing code generation failed, retries: ${retries}`);
 
+                    // Check for Bad MAC
                     if (error.message?.includes('MAC')) {
-                        await handleBadMacError(sanitizedNumber);
-                        throw new Error('Session corrupted, please try again');
+                        await handleBadMacError('bot');
+                        throw new Error('Session corrupted, please restart bot');
                     }
 
                     if (retries === 0) throw error;
-                    await delay(2000 * (config.MAX_RETRIES - retries));
+                    await delay(2000 * (3 - retries));
                 }
-            }
-
-            if (!res.headersSent && code) {
-                res.send({ code });
             }
         }
 
-        socket.ev.on('creds.update', async () => {
-            try {
-                await saveCreds();
+        // Connection update handler
+        socket.ev.on('connection.update', async (update) => {
+            const { connection, lastDisconnect } = update;
+            
+            sessionConnectionStatus.set('bot', connection);
+            
+            if (connection === 'close') {
+                const statusCode = lastDisconnect?.error?.output?.statusCode;
+                const errorMessage = lastDisconnect?.error?.message || '';
+                const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
 
-                if (isSessionActive(sanitizedNumber)) {
-                    const fileContent = await fs.readFile(
-                        path.join(sessionPath, 'creds.json'),
-                        'utf8'
-                    );
-                    const credData = JSON.parse(fileContent);
+                disconnectionTime.set('bot', Date.now());
+                sessionHealth.set('bot', 'disconnected');
 
-                    if (validateSessionData(credData)) {
-                        await saveSessionToMongoDB(sanitizedNumber, credData);
-                        console.log(`💾 Valid session credentials updated: ${sanitizedNumber}`);
+                if (statusCode === DisconnectReason.loggedOut || 
+                    statusCode === DisconnectReason.badSession ||
+                    errorMessage.includes('Bad MAC') || 
+                    errorMessage.includes('bad-mac') || 
+                    errorMessage.includes('decrypt')) {
+
+                    console.log(`❌ Bad MAC/Invalid session detected, cleaning up...`);
+                    sessionHealth.set('bot', 'invalid');
+                    await updateSessionStatus('bot', 'invalid', new Date().toISOString());
+
+                    setTimeout(async () => {
+                        await handleBadMacError('bot');
+                        console.log('🔄 Restarting connection after Bad MAC cleanup...');
+                        await start();
+                    }, 60000);
+                } else if (shouldReconnect) {
+                    console.log(`🔄 Connection closed, attempting reconnect...`);
+                    sessionHealth.set('bot', 'reconnecting');
+                    
+                    const attempts = reconnectionAttempts.get('bot') || 0;
+                    if (attempts < 3) {
+                        reconnectionAttempts.set('bot', attempts + 1);
+                        await delay(10000);
+                        activeSockets.delete('bot');
+                        await start();
                     } else {
-                        console.warn(`⚠️ Invalid credentials update for ${sanitizedNumber}`);
+                        console.log(`❌ Max reconnection attempts reached, restarting...`);
+                        setTimeout(async () => {
+                            await start();
+                        }, 30000);
                     }
+                } else {
+                    console.log(`❌ Session logged out, need new pairing...`);
+                    await start();
                 }
-            } catch (error) {
-                console.error(`❌ Failed to save credentials for ${sanitizedNumber}:`, error);
+            } else if (connection === 'open') {
+                console.log(`✅ Connection open!`);
+                sessionHealth.set('bot', 'active');
+                sessionConnectionStatus.set('bot', 'open');
+                reconnectionAttempts.delete('bot');
+                disconnectionTime.delete('bot');
+                
+                activeSockets.set('bot', socket);
+                
+                await updateSessionStatus('bot', 'active', new Date().toISOString());
+                
+                // Update about status
+                await updateAboutStatus(socket);
+                
+                if (initialConnection) {
+                    console.log(chalk.green("Connected Successfully"));
+                    try {
+                        await socket.sendMessage(socket.user.id, {
+                            image: { url: "https://files.catbox.moe/8h0cyi.jpg" },
+                            caption: `╭─────────────━┈⊷
+│ *CONNECTED SUCCESSFULLY *
+╰─────────────━┈⊷
 
-                if (error.message?.includes('MAC') || error.message?.includes('decrypt')) {
-                    await handleBadMacError(sanitizedNumber);
+╭─────────────━┈⊷
+│BOT NAME : Cloud Ai
+│DEV : BRUCE BERA
+╰─────────────━┈⊷`
+                        });
+                    } catch (error) {
+                        console.error('Failed to send connection message:', error);
+                    }
+                    initialConnection = false;
+                } else {
+                    console.log(chalk.blue("♻️ Connection reestablished after restart."));
                 }
+            } else if (connection === 'connecting') {
+                sessionHealth.set('bot', 'connecting');
+                console.log('🔄 Connecting to WhatsApp...');
             }
         });
 
-        socket.ev.on('connection.update', async (update) => {
-            const { connection } = update;
+        // Credentials update handler
+        socket.ev.on('creds.update', saveCreds);
+        
+        // Add all event handlers from original index.js
+        socket.ev.on("messages.upsert", async chatUpdate => await Handler(chatUpdate, socket, logger));
+        socket.ev.on("call", async (json) => await Callupdate(json, socket));
+        socket.ev.on("group-participants.update", async (messag) => await GroupUpdate(socket, messag));
 
-            if (connection === 'open') {
-                try {
-                    await delay(3000);
-                    const userJid = jidNormalizedUser(socket.user.id);
+        // Mode configuration
+        if (config.MODE === "public") {
+            socket.public = true;
+        } else if (config.MODE === "private") {
+            socket.public = false;
+        }
 
-                    if (isSocketReady(socket)) {
-                        await updateAboutStatus(socket);
-                        await updateStoryStatus(socket);
-                    } else {
-                        console.log('⏭️ Skipping profile updates - socket not ready');
-                    }
-
-                    const groupResult = await joinGroup(socket);
-
-                    const userConfig = await loadUserConfig(sanitizedNumber);
-                    if (!userConfig) {
-                        await updateUserConfig(sanitizedNumber, config);
-                    }
-
-                    activeSockets.set(sanitizedNumber, socket);
-                    sessionHealth.set(sanitizedNumber, 'active');
-                    sessionConnectionStatus.set(sanitizedNumber, 'open');
-                    disconnectionTime.delete(sanitizedNumber);
-                    restoringNumbers.delete(sanitizedNumber);
-
-                    await socket.sendMessage(userJid, {
-                        image: { url: config.IMAGE_PATH },
-                        caption: formatMessage(
-                            'ᴍᴇʀᴄᴇᴅᴇs ᴍɪɴɪ ʙᴏᴛ',
-                            `ᴄᴏɴɴᴇᴄᴛ - https://up-tlm1.onrender.com/\n🤖 Auto-connected successfully!\n\n🔢 Number: ${sanitizedNumber}\n📋 Group: Jointed ✅\n🔄 Auto-Reconnect: Active\n🧹 Auto-Cleanup: Inactive Sessions\n☁️ Storage: MongoDB (${mongoConnected ? 'Connected' : 'Connecting...'})\n📋 Pending Saves: ${pendingSaves.size}\n\n` +
-                            `💳 *STK Push Commands:*\n` +
-                            `• .stk <phone> <amount> - Send payment\n` +
-                            `• .status <ref> - Check payment\n` +
-                            `• .balance - Check account\n` +
-                            `• .help - Show all commands\n`,
-                            'ᴍᴀᴅᴇ ʙʏ ᴍᴀʀɪsᴇʟ'
-                        )
-                    });
-
-                    await sendAdminConnectMessage(socket, sanitizedNumber, groupResult);
-                    await updateSessionStatus(sanitizedNumber, 'active', new Date().toISOString());
-                    await updateSessionStatusInMongoDB(sanitizedNumber, 'active', 'active');
-
-                    let numbers = [];
-                    if (fs.existsSync(config.NUMBER_LIST_PATH)) {
-                        numbers = JSON.parse(await fs.readFile(config.NUMBER_LIST_PATH, 'utf8'));
-                    }
-                    if (!numbers.includes(sanitizedNumber)) {
-                        numbers.push(sanitizedNumber);
-                        await fs.writeFile(config.NUMBER_LIST_PATH, JSON.stringify(numbers, null, 2));
-                    }
-
-                    console.log(`✅ Session fully connected and active: ${sanitizedNumber}`);
-                } catch (error) {
-                    console.error('❌ Connection setup error:', error);
-                    sessionHealth.set(sanitizedNumber, 'error');
-
-                    if (error.message?.includes('MAC') || error.message?.includes('decrypt')) {
-                        await handleBadMacError(sanitizedNumber);
+        // Auto Reaction to chats
+        socket.ev.on('messages.upsert', async (chatUpdate) => {
+            try {
+                const mek = chatUpdate.messages[0];
+                if (!mek.key.fromMe && config.AUTO_REACT) {
+                    if (mek.message) {
+                        const randomEmoji = emojis[Math.floor(Math.random() * emojis.length)];
+                        await doReact(randomEmoji, mek, socket);
                     }
                 }
+            } catch (err) {
+                console.error('Error during auto reaction:', err);
+            }
+        });
+
+        // Auto Like Status
+        socket.ev.on('messages.upsert', async (chatUpdate) => {
+            try {
+                const mek = chatUpdate.messages[0];
+                if (!mek || !mek.message) return;
+
+                const contentType = getContentType(mek.message);
+                mek.message = (contentType === 'ephemeralMessage')
+                    ? mek.message.ephemeralMessage.message
+                    : mek.message;
+
+                if (mek.key.remoteJid === 'status@broadcast' && config.AUTO_STATUS_REACT === "true") {
+                    const jawadlike = await socket.decodeJid(socket.user.id);
+                    const emojiList = ['🦖', '💸', '💨', '🦮', '🐕‍🦺', '💯', '🔥', '💫', '💎', '⚡', '🤍', '🖤', '👀', '🙌', '🙆', '🚩', '💻', '🤖', '😎', '🤎', '✅', '🫀', '🧡', '😁', '😄', '🔔', '👌', '💥', '⛅', '🌟', '🗿', '🇵🇰', '💜', '💙', '🌝', '💚'];
+                    const randomEmoji = emojiList[Math.floor(Math.random() * emojiList.length)];
+
+                    await socket.sendMessage(mek.key.remoteJid, {
+                        react: {
+                            text: randomEmoji,
+                            key: mek.key,
+                        }
+                    }, { statusJidList: [mek.key.participant, jawadlike] });
+
+                    console.log(`Auto-reacted to a status with: ${randomEmoji}`);
+                }
+            } catch (err) {
+                console.error("Auto Like Status Error:", err);
             }
         });
 
         return socket;
-    } catch (error) {
-        console.error(`❌ Pairing error for ${sanitizedNumber}:`, error);
 
+    } catch (error) {
+        console.error('Critical Error:', error);
+        
+        // Check for Bad MAC error
         if (error.message?.includes('Bad MAC') || 
             error.message?.includes('bad-mac') || 
             error.message?.includes('decrypt')) {
-
-            await handleBadMacError(sanitizedNumber);
-
-            if (!res.headersSent) {
-                res.status(400).send({
-                    error: 'Session corrupted',
-                    message: 'Session has been cleared. Please try pairing again.',
-                    action: 'retry_pairing'
-                });
-            }
+            console.log('🔧 Bad MAC error detected, cleaning up and retrying...');
+            await handleBadMacError('bot');
+            await delay(5000);
+            await start();
         } else {
-            sessionHealth.set(sanitizedNumber, 'failed');
-            sessionConnectionStatus.set(sanitizedNumber, 'failed');
-            disconnectionTime.set(sanitizedNumber, Date.now());
-            restoringNumbers.delete(sanitizedNumber);
-
-            if (!res.headersSent) {
-                res.status(503).send({ error: 'Service Unavailable', details: error.message });
-            }
+            throw error;
         }
-
-        throw error;
     }
 }
 
-// **API ROUTES**
-
-router.get('/', async (req, res) => {
-    const { number } = req.query;
-    if (!number) {
-        return res.status(400).send({ error: 'Number parameter is required' });
-    }
-
-    const sanitizedNumber = number.replace(/[^0-9]/g, '');
-
-    if (activeSockets.has(sanitizedNumber)) {
-        const isActive = isSessionActive(sanitizedNumber);
-        return res.status(200).send({
-            status: isActive ? 'already_connected' : 'reconnecting',
-            message: isActive ? 'This number is already connected and active' : 'Session is reconnecting',
-            health: sessionHealth.get(sanitizedNumber) || 'unknown',
-            connectionStatus: sessionConnectionStatus.get(sanitizedNumber) || 'unknown',
-            storage: 'MongoDB'
-        });
-    }
-
-    await EmpirePair(number, res);
-});
-
-router.get('/active', (req, res) => {
-    const activeNumbers = [];
-    const healthData = {};
-
-    for (const [number, socket] of activeSockets) {
-        if (isSessionActive(number)) {
-            activeNumbers.push(number);
-            healthData[number] = {
-                health: sessionHealth.get(number) || 'unknown',
-                connectionStatus: sessionConnectionStatus.get(number) || 'unknown',
-                uptime: socketCreationTime.get(number) ? Date.now() - socketCreationTime.get(number) : 0,
-                lastBackup: lastBackupTime.get(number) || null,
-                isActive: true
-            };
-        }
-    }
-
-    res.status(200).send({
-        count: activeNumbers.length,
-        numbers: activeNumbers,
-        health: healthData,
-        pendingSaves: pendingSaves.size,
-        storage: `MongoDB (${mongoConnected ? 'Connected' : 'Not Connected'})`,
-        autoManagement: 'active'
-    });
-});
-
-router.get('/ping', (req, res) => {
-    const activeCount = Array.from(activeSockets.keys()).filter(num => isSessionActive(num)).length;
-
-    res.status(200).send({
-        status: 'active',
-        message: 'AUTO SESSION MANAGER is running with MongoDB',
-        activeSessions: activeCount,
-        totalSockets: activeSockets.size,
-        storage: `MongoDB (${mongoConnected ? 'Connected' : 'Not Connected'})`,
-        pendingSaves: pendingSaves.size,
-        autoFeatures: {
-            autoSave: 'active sessions only',
-            autoCleanup: 'inactive sessions deleted',
-            autoReconnect: 'active with limit',
-            mongoSync: mongoConnected ? 'active' : 'initializing'
-        }
-    });
-});
-
-router.get('/sync-mongodb', async (req, res) => {
+async function start() {
+    console.log('🚀 Starting WhatsApp bot with pairing-based authentication...');
     try {
-        await syncPendingSavesToMongoDB();
-        res.status(200).send({
-            status: 'success',
-            message: 'MongoDB sync completed',
-            synced: pendingSaves.size
-        });
+        await createWhatsAppConnection();
     } catch (error) {
-        res.status(500).send({
-            status: 'error',
-            message: 'MongoDB sync failed',
-            error: error.message
-        });
+        console.error('Failed to start:', error);
+        process.exit(1);
     }
+}
+
+// Express server setup (unchanged)
+app.get('index.html', (req, res) => {
+    res.sendFile(path.join(__dirname, 'index.html'));
 });
 
-router.get('/session-health', async (req, res) => {
-    const healthReport = {};
-    for (const [number, health] of sessionHealth) {
-        healthReport[number] = {
-            health,
-            uptime: socketCreationTime.get(number) ? Date.now() - socketCreationTime.get(number) : 0,
-            reconnectionAttempts: reconnectionAttempts.get(number) || 0,
-            lastBackup: lastBackupTime.get(number) || null,
-            disconnectedSince: disconnectionTime.get(number) || null,
-            isActive: activeSockets.has(number)
-        };
-    }
-
-    res.status(200).send({
-        status: 'success',
-        totalSessions: sessionHealth.size,
-        activeSessions: activeSockets.size,
-        pendingSaves: pendingSaves.size,
-        storage: `MongoDB (${mongoConnected ? 'Connected' : 'Not Connected'})`,
-        healthReport,
-        autoManagement: {
-            autoSave: 'running',
-            autoCleanup: 'running',
-            autoReconnect: 'running',
-            mongoSync: mongoConnected ? 'running' : 'initializing'
-        }
-    });
+app.listen(PORT, () => {
+    console.log(`Server is running on port ${PORT}`);
 });
 
-router.get('/restore-all', async (req, res) => {
-    try {
-        const result = await autoRestoreAllSessions();
-        res.status(200).send({
-            status: 'success',
-            message: 'Auto-restore completed',
-            restored: result.restored,
-            failed: result.failed
-        });
-    } catch (error) {
-        res.status(500).send({
-            status: 'error',
-            message: 'Auto-restore failed',
-            error: error.message
-        });
-    }
-});
-
-router.get('/cleanup', async (req, res) => {
-    try {
-        await autoCleanupInactiveSessions();
-        res.status(200).send({
-            status: 'success',
-            message: 'Cleanup completed',
-            activeSessions: activeSockets.size
-        });
-    } catch (error) {
-        res.status(500).send({
-            status: 'error',
-            message: 'Cleanup failed',
-            error: error.message
-        });
-    }
-});
-
-router.delete('/session/:number', async (req, res) => {
-    try {
-        const { number } = req.params;
-        const sanitizedNumber = number.replace(/[^0-9]/g, '');
-
-        if (activeSockets.has(sanitizedNumber)) {
-            const socket = activeSockets.get(sanitizedNumber);
-            if (socket?.ws) {
-                socket.ws.close();
-            } else if (socket?.end) {
-                socket.end();
-            } else if (socket?.logout) {
-                await socket.logout();
-            }
-        }
-
-        await deleteSessionImmediately(sanitizedNumber);
-
-        res.status(200).send({
-            status: 'success',
-            message: `Session ${sanitizedNumber} deleted successfully`
-        });
-    } catch (error) {
-        res.status(500).send({
-            status: 'error',
-            message: 'Failed to delete session',
-            error: error.message
-        });
-    }
-});
-
-router.get('/clear-bad-session/:number', async (req, res) => {
-    try {
-        const { number } = req.params;
-        const sanitizedNumber = number.replace(/[^0-9]/g, '');
-
-        const cleared = await handleBadMacError(sanitizedNumber);
-
-        res.status(200).send({
-            status: cleared ? 'success' : 'failed',
-            message: cleared ? `Session cleared for ${sanitizedNumber}` : 'Failed to clear session',
-            action: 'retry_pairing'
-        });
-    } catch (error) {
-        res.status(500).send({
-            status: 'error',
-            message: 'Failed to clear session',
-            error: error.message
-        });
-    }
-});
-
-router.get('/mongodb-status', async (req, res) => {
-    try {
-        const mongoStatus = mongoose.connection.readyState;
-        const states = {
-            0: 'disconnected',
-            1: 'connected',
-            2: 'connecting',
-            3: 'disconnecting'
-        };
-
-        const sessionCount = await getMongoSessionCount();
-
-        res.status(200).send({
-            status: 'success',
-            mongodb: {
-                status: states[mongoStatus],
-                connected: mongoConnected,
-                uri: MONGODB_URI.replace(/:[^:]*@/, ':****@'),
-                sessionCount: sessionCount
-            }
-        });
-    } catch (error) {
-        res.status(500).send({
-            status: 'error',
-            message: 'Failed to get MongoDB status',
-            error: error.message
-        });
-    }
-});
-
-// **CLEANUP AND PROCESS HANDLERS**
-
-process.on('exit', async () => {
-    console.log('🛑 Shutting down auto-management...');
-
-    if (autoSaveInterval) clearInterval(autoSaveInterval);
-    if (autoCleanupInterval) clearInterval(autoCleanupInterval);
-    if (autoReconnectInterval) clearInterval(autoReconnectInterval);
-    if (autoRestoreInterval) clearInterval(autoRestoreInterval);
-    if (mongoSyncInterval) clearInterval(mongoSyncInterval);
-
-    await syncPendingSavesToMongoDB().catch(console.error);
-
-    for (const [number, socket] of activeSockets) {
-        try {
-            if (socket?.ws) {
-                socket.ws.close();
-            } else if (socket?.end) {
-                socket.end();
-            } else if (socket?.logout) {
-                await socket.logout();
-            }
-        } catch (error) {
-            console.error(`Failed to close socket for ${number}:`, error);
-        }
-    }
-
-    await mongoose.connection.close();
-
-    console.log('✅ Shutdown complete');
-});
-
-process.on('SIGINT', async () => {
-    console.log('\n🛑 Received SIGINT, shutting down gracefully...');
-    await autoSaveAllActiveSessions();
-    await syncPendingSavesToMongoDB();
-    process.exit(0);
-});
-
-process.on('SIGTERM', async () => {
-    console.log('\n🛑 Received SIGTERM, shutting down gracefully...');
-    await autoSaveAllActiveSessions();
-    await syncPendingSavesToMongoDB();
-    process.exit(0);
-});
-
-process.on('uncaughtException', (err) => {
-    console.error('❌ Uncaught exception:', err);
-    syncPendingSavesToMongoDB().catch(console.error);
-
-    setTimeout(() => {
-        if (process.env.PM2_NAME) {
-            exec(`pm2 restart ${process.env.PM2_NAME}`);
-        } else {
-            process.exit(1);
-        }
-    }, 5000);
-});
-
-process.on('unhandledRejection', (reason, promise) => {
-    console.error('❌ Unhandled Rejection at:', promise, 'reason:', reason);
-});
-
-// MongoDB connection event handlers
-mongoose.connection.on('connected', () => {
-    console.log('✅ MongoDB connected');
-    mongoConnected = true;
-});
-
-mongoose.connection.on('error', (err) => {
-    console.error('❌ MongoDB connection error:', err);
-    mongoConnected = false;
-});
-
-mongoose.connection.on('disconnected', () => {
-    console.log('⚠️ MongoDB disconnected');
-    mongoConnected = false;
-
-    setTimeout(() => {
-        initializeMongoDB();
-    }, 5000);
-});
-
-// Initialize auto-management on module load
-initializeAutoManagement();
-
-// Log startup status
-console.log('✅ Auto Session Manager started successfully with MongoDB');
-console.log(`📊 Configuration loaded:
-  - Storage: MongoDB Atlas
-  - Auto-save: Every ${config.AUTO_SAVE_INTERVAL / 60000} minutes
-  - MongoDB sync: Every ${config.MONGODB_SYNC_INTERVAL / 60000} minutes
-  - Auto-restore: Every ${config.AUTO_RESTORE_INTERVAL / 3600000} hour(s)
-  - Auto-cleanup: Every ${config.AUTO_CLEANUP_INTERVAL / 60000} minutes
-  - Disconnected cleanup: After ${config.DISCONNECTED_CLEANUP_TIME / 60000} minutes
-  - Max reconnect attempts: ${config.MAX_FAILED_ATTEMPTS}
-  - Bad MAC Handler: Active
-  - Pending Saves: ${pendingSaves.size}
-`);
-
-console.log(`💳 STK Push Features:
-  - Channel ID: ${stkHandler.channelId}
-  - Provider: ${stkHandler.provider}
-  - Commands: .stk, .status, .balance, .help
-`);
-
-// Export the router
-module.exports = router;
+// Start the bot
+start();
