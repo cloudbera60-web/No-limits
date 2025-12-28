@@ -472,7 +472,8 @@ async function start() {
             }
         });
 
-        Matrix.ev.on('connection.update', (update) => {
+        // FIXED: Added async to this event handler
+        Matrix.ev.on('connection.update', async (update) => {
             const { connection, lastDisconnect } = update;
             if (connection === 'close') {
                 if (lastDisconnect.error?.output?.statusCode !== DisconnectReason.loggedOut) {
@@ -484,7 +485,7 @@ async function start() {
                     console.log(chalk.green("Connected Successfully cloud Ai 🤍"));
                     
                     // Send welcome message
-                    Matrix.sendMessage(Matrix.user.id, { 
+                    await Matrix.sendMessage(Matrix.user.id, { 
                         image: { url: "https://files.catbox.moe/pf270b.jpg" }, 
                         caption: `*Hello there User! 👋🏻* 
 
@@ -504,7 +505,7 @@ https://github.com/DEVELOPER-BERA/CLOUD-AI
                     });
                     
                     // Update about status
-                    updateAboutStatus(Matrix);
+                    await updateAboutStatus(Matrix);
                     
                     // Follow newsletters
                     const followed = new Set();
