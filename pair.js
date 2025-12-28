@@ -7,16 +7,13 @@ import {
     fetchLatestBaileysVersion,
     DisconnectReason,
     useMultiFileAuthState,
-    getContentType,
     makeCacheableSignalKeyStore
 } from '@whiskeysockets/baileys';
-import { Handler, Callupdate, GroupUpdate } from './data/index.js';
 import express from 'express';
 import pino from 'pino';
 import fs from 'fs';
 import path from 'path';
 import chalk from 'chalk';
-import config from './config.cjs';
 
 // Initialize Express app FIRST
 const app = express();
@@ -76,6 +73,14 @@ async function handleBadMacError() {
         return false;
     }
 }
+
+// Simple configuration (temporarily replacing config.cjs)
+const config = {
+    MODE: process.env.MODE || "public",
+    PREFIX: process.env.PREFIX || ".",
+    AUTO_REACT: process.env.AUTO_REACT || false,
+    AUTO_STATUS_REACT: process.env.AUTO_STATUS_REACT || "false"
+};
 
 // Main WhatsApp connection function (adapted from pair.js)
 async function createWhatsAppConnection() {
@@ -220,11 +225,6 @@ async function createWhatsAppConnection() {
         // Credentials update handler
         socket.ev.on('creds.update', saveCreds);
         
-        // Add all event handlers from original index.js
-        socket.ev.on("messages.upsert", async chatUpdate => await Handler(chatUpdate, socket, logger));
-        socket.ev.on("call", async (json) => await Callupdate(json, socket));
-        socket.ev.on("group-participants.update", async (messag) => await GroupUpdate(socket, messag));
-
         // Mode configuration
         if (config.MODE === "public") {
             socket.public = true;
@@ -274,7 +274,8 @@ app.get('/', (req, res) => {
         version: '1.0.0',
         authentication: 'pairing-based',
         session: 'local-storage',
-        port: PORT
+        port: PORT,
+        mode: config.MODE
     });
 });
 
