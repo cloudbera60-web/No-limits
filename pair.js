@@ -201,11 +201,11 @@ https://github.com/DEVELOPER-BERA/CLOUD-AI
 }
 
 app.get('/', (req, res) => {
-    res.sendFile(path.join(__dirname, 'main.html'));
+    res.send('Hello World!');
 });
 
 app.get('/pair', (req, res) => {
-    res.sendFile(path.join(__dirname, 'pair.html'));
+    res.send('<h1>Pairing Page</h1><p>Use /api/pairing-code to get pairing code</p>');
 });
 
 app.get('/api/pairing-code', (req, res) => {
