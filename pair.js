@@ -362,7 +362,8 @@ app.get('/', (req, res) => {
         service: 'whatsapp-bot',
         version: '1.0.0',
         authentication: 'pairing-based',
-        session: 'local-storage'
+        session: 'local-storage',
+        port: PORT
     });
 });
 
