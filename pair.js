@@ -20,25 +20,27 @@ import NodeCache from 'node-cache';
 
 // Configuration
 const prefix = process.env.PREFIX || '.';
-const sessionName = "session";
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-const MAIN_LOGGER = pino({
+// Logger setup
+const logger = pino({
     timestamp: () => `,"time":"${new Date().toJSON()}"`
 });
-const logger = MAIN_LOGGER.child({});
-logger.level = "trace";
 
 const msgRetryCounterCache = new NodeCache();
 
+// Get current directory
 const __filename = new URL(import.meta.url).pathname;
 const __dirname = path.dirname(__filename);
 
+// Session directory
 const sessionDir = path.join(__dirname, 'session');
 
+// Create session directory if it doesn't exist
 if (!fs.existsSync(sessionDir)) {
     fs.mkdirSync(sessionDir, { recursive: true });
+    console.log(`📁 Created session directory: ${sessionDir}`);
 }
 
 // Helper functions
@@ -245,19 +247,33 @@ function setupConnectionHandlers(socket, saveCreds) {
             }
         }
         
-        // Handle regular messages (you can add your command handlers here)
+        // Handle regular messages
         if (message.message && !message.key.fromMe) {
             const text = message.message.conversation || 
                         message.message.extendedTextMessage?.text || 
                         '';
             
-            if (text.toLowerCase() === 'ping') {
+            // Basic command handling
+            if (text.toLowerCase().startsWith(prefix + 'ping')) {
                 await socket.sendMessage(message.key.remoteJid, { text: 'Pong! 🏓' });
             }
             
-            if (text.toLowerCase() === 'hello') {
+            if (text.toLowerCase().startsWith(prefix + 'hello')) {
                 await socket.sendMessage(message.key.remoteJid, { 
                     text: 'Hello! I am Cloud Ai bot. How can I help you?' 
+                });
+            }
+            
+            if (text.toLowerCase().startsWith(prefix + 'help')) {
+                await socket.sendMessage(message.key.remoteJid, {
+                    text: `*🤖 Cloud Ai Bot Commands:*\n\n` +
+                          `${prefix}ping - Check if bot is alive\n` +
+                          `${prefix}hello - Greet the bot\n` +
+                          `${prefix}help - Show this help message\n\n` +
+                          `*Auto Features:*\n` +
+                          `• Auto-react to status updates\n` +
+                          `• Auto-reconnect on disconnect\n` +
+                          `• Pairing-based authentication`
                 });
             }
         }
@@ -294,7 +310,7 @@ async function startBot() {
     }
 }
 
-// Setup Express server
+// Setup Express server routes
 app.get('/', (req, res) => {
     res.send(`
         <!DOCTYPE html>
@@ -345,6 +361,13 @@ app.get('/', (req, res) => {
                     margin: 10px 0;
                     font-family: monospace;
                     font-size: 1.2em;
+                    text-align: center;
+                }
+                .footer {
+                    text-align: center;
+                    margin-top: 30px;
+                    opacity: 0.8;
+                    font-size: 0.9em;
                 }
             </style>
         </head>
@@ -357,6 +380,7 @@ app.get('/', (req, res) => {
                     <p><strong>Port:</strong> ${PORT}</p>
                     <p><strong>Authentication:</strong> Pairing Code</p>
                     <p><strong>Session:</strong> Local Storage</p>
+                    <p><strong>Prefix:</strong> ${prefix}</p>
                 </div>
                 
                 <div class="instructions">
@@ -369,7 +393,19 @@ app.get('/', (req, res) => {
                         <li>Tap "Link a Device"</li>
                         <li>Enter the code shown in console</li>
                     </ol>
+                    
+                    <h3>📝 Available Commands:</h3>
+                    <ul>
+                        <li><code>${prefix}ping</code> - Check if bot is alive</li>
+                        <li><code>${prefix}hello</code> - Greet the bot</li>
+                        <li><code>${prefix}help</code> - Show help message</li>
+                    </ul>
+                    
                     <p><em>Note: The bot will automatically reconnect if disconnected.</em></p>
+                </div>
+                
+                <div class="footer">
+                    <p>Developed by BRUCE BERA | Cloud Ai Bot</p>
                 </div>
             </div>
         </body>
@@ -377,10 +413,21 @@ app.get('/', (req, res) => {
     `);
 });
 
+// Health check endpoint
+app.get('/health', (req, res) => {
+    res.json({
+        status: 'ok',
+        timestamp: new Date().toISOString(),
+        service: 'whatsapp-bot',
+        version: '1.0.0'
+    });
+});
+
 // Start server
 app.listen(PORT, () => {
     console.log(`🌐 Web server running on port ${PORT}`);
     console.log(`🔗 Access at: http://localhost:${PORT}`);
+    console.log(`🔗 Health check: http://localhost:${PORT}/health`);
 });
 
 // Start the bot
@@ -395,4 +442,12 @@ process.on('SIGINT', () => {
 process.on('SIGTERM', () => {
     console.log('\n🛑 Received SIGTERM, shutting down gracefully...');
     process.exit(0);
+});
+
+process.on('uncaughtException', (error) => {
+    console.error('❌ Uncaught exception:', error);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('❌ Unhandled rejection at:', promise, 'reason:', reason);
 });
