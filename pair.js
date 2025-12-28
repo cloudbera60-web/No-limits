@@ -1,5 +1,4 @@
 import express from 'express';
-import bodyParser from 'body-parser';
 import fs from 'fs';
 import path from 'path';
 import pino from 'pino';
@@ -13,13 +12,8 @@ import {
   useMultiFileAuthState,
   makeCacheableSignalKeyStore,
   DisconnectReason,
-  getContentType,
   Browsers,
-  delay,
-  proto,
-  prepareWAMessageMedia,
-  downloadContentFromMessage,
-  generateWAMessageFromContent
+  delay
 } from '@whiskeysockets/baileys';
 
 import { Handler, Callupdate, GroupUpdate } from './data/index.js';
@@ -31,8 +25,6 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
-app.use(bodyParser.json());
-app.use(bodyParser.urlencoded({ extended: true }));
 
 const PORT = process.env.PORT || 3000;
 const sessionDir = path.join(__dirname, 'session');
