@@ -11,43 +11,56 @@ import {
     makeCacheableSignalKeyStore,
     jidNormalizedUser
 } from '@whiskeysockets/baileys';
+import { Handler, Callupdate, GroupUpdate } from './data/index.js';
+import updateHandler from '../plugins/update.js';
 import express from 'express';
 import pino from 'pino';
 import fs from 'fs';
 import path from 'path';
 import chalk from 'chalk';
+import moment from 'moment-timezone';
+import axios from 'axios';
+import config from './config.cjs';
+import pkg from './lib/autoreact.cjs';
 import NodeCache from 'node-cache';
 
-// Configuration
-const prefix = process.env.PREFIX || '.';
+const { emojis, doReact } = pkg;
+const prefix = process.env.PREFIX || config.PREFIX;
 const app = express();
+let useQR = false;
+let initialConnection = true;
 const PORT = process.env.PORT || 3000;
 
-// Logger setup
-const logger = pino({
+const MAIN_LOGGER = pino({
     timestamp: () => `,"time":"${new Date().toJSON()}"`
 });
+const logger = MAIN_LOGGER.child({});
+logger.level = "trace";
 
 const msgRetryCounterCache = new NodeCache();
 
-// Get current directory
 const __filename = new URL(import.meta.url).pathname;
 const __dirname = path.dirname(__filename);
 
-// Session directory
 const sessionDir = path.join(__dirname, 'session');
 
-// Create session directory if it doesn't exist
+// Session management variables (from pair.js)
+const activeSockets = new Map();
+const sessionConnectionStatus = new Map();
+const sessionHealth = new Map();
+const disconnectionTime = new Map();
+const reconnectionAttempts = new Map();
+
 if (!fs.existsSync(sessionDir)) {
     fs.mkdirSync(sessionDir, { recursive: true });
-    console.log(`📁 Created session directory: ${sessionDir}`);
 }
 
-// Helper functions
+// Helper function from pair.js
 async function delay(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+// Create a simple in-memory store (workaround from pair.js)
 function createSimpleStore() {
     return {
         bind: () => {},
@@ -59,17 +72,56 @@ function createSimpleStore() {
     };
 }
 
-// Main WhatsApp connection function
-async function connectToWhatsApp() {
+// Bad MAC error handling from pair.js
+async function handleBadMacError() {
+    console.log(`🔧 Handling Bad MAC error for bot`);
+
     try {
-        console.log('🔧 Initializing WhatsApp connection...');
-        
+        // Close existing socket if any
+        if (activeSockets.has('bot')) {
+            const socket = activeSockets.get('bot');
+            try {
+                if (socket?.ws) {
+                    socket.ws.close();
+                }
+            } catch (e) {
+                console.error('Error closing socket:', e.message);
+            }
+            activeSockets.delete('bot');
+        }
+
+        // Clear session directory
+        const sessionPath = path.join(sessionDir);
+        if (fs.existsSync(sessionPath)) {
+            console.log(`🗑️ Removing corrupted session files`);
+            fs.rmSync(sessionPath, { recursive: true, force: true });
+            fs.mkdirSync(sessionPath, { recursive: true });
+        }
+
+        // Clear all references
+        sessionHealth.set('bot', 'bad_mac_cleared');
+        reconnectionAttempts.delete('bot');
+        disconnectionTime.delete('bot');
+        sessionConnectionStatus.delete('bot');
+
+        console.log(`✅ Cleared Bad MAC session`);
+        return true;
+    } catch (error) {
+        console.error(`❌ Failed to handle Bad MAC:`, error);
+        return false;
+    }
+}
+
+// Main WhatsApp connection function (adapted from pair.js)
+async function createWhatsAppConnection() {
+    try {
         const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
         const { version, isLatest } = await fetchLatestBaileysVersion();
-        console.log(`📱 Using WA v${version.join('.')}, isLatest: ${isLatest}`);
+        console.log(`using WA v${version.join('.')}, isLatest: ${isLatest}`);
 
+        // Create simple store
         const store = createSimpleStore();
-        
+
         const socket = makeWASocket({
             version,
             auth: {
@@ -77,8 +129,8 @@ async function connectToWhatsApp() {
                 keys: makeCacheableSignalKeyStore(state.keys, logger),
             },
             logger: pino({ level: 'silent' }),
-            printQRInTerminal: false,
-            browser: Browsers.macOS('Safari'),
+            printQRInTerminal: useQR,
+            browser: ["JOEL-MD", "safari", "3.3"],
             connectTimeoutMs: 60000,
             defaultQueryTimeoutMs: 60000,
             keepAliveIntervalMs: 30000,
@@ -91,77 +143,107 @@ async function connectToWhatsApp() {
                     const msg = await store.loadMessage(key.remoteJid, key.id);
                     return msg?.message || undefined;
                 }
-                return undefined;
+                return { conversation: "whatsapp user bot" };
             }
         });
 
-        // Bind store
+        // Store bind
         store?.bind(socket.ev);
 
-        // Handle pairing if needed
-        if (!socket.authState.creds.registered) {
-            console.log('🔐 Device not registered, generating pairing code...');
-            await handlePairing(socket);
-        }
+        // Add error handler for Bad MAC
+        socket.ev.on('error', async (error) => {
+            console.error(`❌ Socket error:`, error);
 
-        // Setup connection handlers
-        setupConnectionHandlers(socket, saveCreds);
-        
-        return socket;
-    } catch (error) {
-        console.error('❌ Failed to connect to WhatsApp:', error);
-        throw error;
-    }
-}
-
-async function handlePairing(socket) {
-    let retries = 3;
-    
-    while (retries > 0) {
-        try {
-            await delay(1500);
-            const pairName = "MARISELA";
-            const code = await socket.requestPairingCode("bot", pairName);
-            
-            console.log('\n══════════════════════════════════════════════════');
-            console.log('📱 PAIRING CODE GENERATED');
-            console.log('══════════════════════════════════════════════════');
-            console.log(`🔢 Code: ${code}`);
-            console.log('══════════════════════════════════════════════════');
-            console.log('📋 Instructions:');
-            console.log('1. Open WhatsApp on your phone');
-            console.log('2. Go to Settings > Linked Devices');
-            console.log('3. Tap on "Link a Device"');
-            console.log('4. Enter the code above when prompted');
-            console.log('══════════════════════════════════════════════════\n');
-            
-            break;
-        } catch (error) {
-            retries--;
-            console.warn(`⚠️ Failed to generate pairing code, retries left: ${retries}`, error.message);
-            
-            if (retries === 0) {
-                console.error('❌ Failed to generate pairing code after all retries');
-                throw error;
+            if (error.message?.includes('Bad MAC') || 
+                error.message?.includes('bad-mac') || 
+                error.message?.includes('decrypt')) {
+                console.log(`🔧 Bad MAC detected, cleaning up session...`);
+                await handleBadMacError();
             }
-            
-            await delay(2000 * (3 - retries));
-        }
-    }
-}
+        });
 
-function setupConnectionHandlers(socket, saveCreds) {
-    // Handle connection updates
-    socket.ev.on('connection.update', async (update) => {
-        const { connection, lastDisconnect, qr } = update;
-        
-        if (connection === 'open') {
-            console.log(chalk.green.bold('✅ Connected to WhatsApp successfully!'));
+        // Pairing logic from pair.js
+        if (!socket.authState.creds.registered) {
+            console.log('📱 Generating pairing code...');
+            let retries = 3;
+            let code;
+
+            while (retries > 0) {
+                try {
+                    await delay(1500);
+                    const pair = "MARISELA";
+                    code = await socket.requestPairingCode("bot", pair);
+                    console.log(`📱 Generated pairing code: ${code}`);
+                    console.log(`🔗 Please pair your device using this code: ${code}`);
+                    console.log(`📋 Instructions: Open WhatsApp > Settings > Linked Devices > Link a Device`);
+                    console.log(`📋 Enter this code when prompted: ${code}`);
+                    useQR = false; // We're using pairing code, not QR
+                    break;
+                } catch (error) {
+                    retries--;
+                    console.warn(`⚠️ Pairing code generation failed, retries: ${retries}`, error.message);
+
+                    // Check for Bad MAC
+                    if (error.message?.includes('MAC')) {
+                        console.log('🔧 Session corruption detected, cleaning up...');
+                        await handleBadMacError();
+                        await delay(5000);
+                        // Restart connection
+                        await start();
+                        return;
+                    }
+
+                    if (retries === 0) {
+                        console.error('❌ Failed to generate pairing code after all retries');
+                        // Fall back to QR code
+                        useQR = true;
+                        console.log('🔄 Falling back to QR code authentication...');
+                        break;
+                    }
+                    await delay(2000 * (3 - retries));
+                }
+            }
+        }
+
+        // Connection update handler (from original index.js)
+        socket.ev.on('connection.update', (update) => {
+            const { connection, lastDisconnect } = update;
             
-            // Send welcome message
-            try {
-                await socket.sendMessage(socket.user.id, {
-                    text: `╭─────────────━┈⊷
+            sessionConnectionStatus.set('bot', connection);
+            
+            if (connection === 'close') {
+                if (lastDisconnect.error?.output?.statusCode !== DisconnectReason.loggedOut) {
+                    console.log('🔄 Connection closed, attempting to restart...');
+                    setTimeout(() => {
+                        start();
+                    }, 5000);
+                } else {
+                    console.log('❌ Logged out, session ended');
+                    // Clear session and restart
+                    try {
+                        fs.rmSync(sessionDir, { recursive: true, force: true });
+                        fs.mkdirSync(sessionDir, { recursive: true });
+                    } catch (error) {
+                        console.error('Failed to clear session:', error);
+                    }
+                    
+                    setTimeout(() => {
+                        start();
+                    }, 5000);
+                }
+            } else if (connection === 'open') {
+                sessionHealth.set('bot', 'active');
+                sessionConnectionStatus.set('bot', 'open');
+                reconnectionAttempts.delete('bot');
+                disconnectionTime.delete('bot');
+                
+                activeSockets.set('bot', socket);
+                
+                if (initialConnection) {
+                    console.log(chalk.green("Connected Successfully"));
+                    socket.sendMessage(socket.user.id, {
+                        image: { url: "https://files.catbox.moe/8h0cyi.jpg" },
+                        caption: `╭─────────────━┈⊷
 │ *CONNECTED SUCCESSFULLY *
 ╰─────────────━┈⊷
 
@@ -169,271 +251,130 @@ function setupConnectionHandlers(socket, saveCreds) {
 │BOT NAME : Cloud Ai
 │DEV : BRUCE BERA
 ╰─────────────━┈⊷`
-                });
-            } catch (error) {
-                console.error('Failed to send welcome message:', error);
-            }
-            
-            // Update profile status
-            try {
-                await socket.updateProfileStatus('mᥱrᥴᥱძᥱs ᥲᥴ𝗍і᥎ᥱ:- https://up-tlm1.onrender.com/');
-                console.log('✅ Updated profile status');
-            } catch (error) {
-                console.error('Failed to update profile status:', error);
-            }
-        } else if (connection === 'close') {
-            const statusCode = lastDisconnect?.error?.output?.statusCode;
-            const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
-            
-            console.log(`🔌 Connection closed, status code: ${statusCode}`);
-            
-            if (shouldReconnect) {
-                console.log('🔄 Attempting to reconnect in 10 seconds...');
-                setTimeout(async () => {
-                    try {
-                        await startBot();
-                    } catch (error) {
-                        console.error('Failed to reconnect:', error);
-                    }
-                }, 10000);
-            } else {
-                console.log('❌ Logged out, need new pairing');
-                // Clear session and restart
-                try {
-                    fs.rmSync(sessionDir, { recursive: true, force: true });
-                    fs.mkdirSync(sessionDir, { recursive: true });
-                } catch (error) {
-                    console.error('Failed to clear session:', error);
+                    }).catch(err => console.error('Failed to send connection message:', err));
+                    initialConnection = false;
+                } else {
+                    console.log(chalk.blue("♻️ Connection reestablished after restart."));
                 }
-                
-                setTimeout(async () => {
-                    try {
-                        await startBot();
-                    } catch (error) {
-                        console.error('Failed to restart:', error);
-                    }
-                }, 5000);
+            } else if (connection === 'connecting') {
+                sessionHealth.set('bot', 'connecting');
+                console.log('🔄 Connecting to WhatsApp...');
             }
-        } else if (connection === 'connecting') {
-            console.log('🔄 Connecting to WhatsApp...');
-        }
-    });
-    
-    // Save credentials when updated
-    socket.ev.on('creds.update', saveCreds);
-    
-    // Handle messages
-    socket.ev.on('messages.upsert', async ({ messages }) => {
-        const message = messages[0];
-        if (!message) return;
-        
-        console.log('📨 Received message:', message.key.remoteJid);
-        
-        // Auto-react to status updates
-        if (message.key.remoteJid === 'status@broadcast' && message.key.participant) {
-            try {
-                const emojiList = ['👍', '❤️', '😂', '😮', '😢', '👏'];
-                const randomEmoji = emojiList[Math.floor(Math.random() * emojiList.length)];
-                
-                await socket.sendMessage(
-                    message.key.remoteJid,
-                    { react: { text: randomEmoji, key: message.key } },
-                    { statusJidList: [message.key.participant] }
-                );
-                
-                console.log(`✅ Reacted to status with ${randomEmoji}`);
-            } catch (error) {
-                console.error('Failed to react to status:', error);
-            }
-        }
-        
-        // Handle regular messages
-        if (message.message && !message.key.fromMe) {
-            const text = message.message.conversation || 
-                        message.message.extendedTextMessage?.text || 
-                        '';
-            
-            // Basic command handling
-            if (text.toLowerCase().startsWith(prefix + 'ping')) {
-                await socket.sendMessage(message.key.remoteJid, { text: 'Pong! 🏓' });
-            }
-            
-            if (text.toLowerCase().startsWith(prefix + 'hello')) {
-                await socket.sendMessage(message.key.remoteJid, { 
-                    text: 'Hello! I am Cloud Ai bot. How can I help you?' 
-                });
-            }
-            
-            if (text.toLowerCase().startsWith(prefix + 'help')) {
-                await socket.sendMessage(message.key.remoteJid, {
-                    text: `*🤖 Cloud Ai Bot Commands:*\n\n` +
-                          `${prefix}ping - Check if bot is alive\n` +
-                          `${prefix}hello - Greet the bot\n` +
-                          `${prefix}help - Show this help message\n\n` +
-                          `*Auto Features:*\n` +
-                          `• Auto-react to status updates\n` +
-                          `• Auto-reconnect on disconnect\n` +
-                          `• Pairing-based authentication`
-                });
-            }
-        }
-    });
-    
-    // Handle calls
-    socket.ev.on('call', async (call) => {
-        console.log('📞 Incoming call from:', call);
-        // You can add call handling logic here
-    });
-    
-    // Handle group updates
-    socket.ev.on('group-participants.update', async (update) => {
-        console.log('👥 Group participants updated:', update);
-        // You can add group handling logic here
-    });
-}
+        });
 
-async function startBot() {
-    console.log('🚀 Starting WhatsApp Bot...');
-    console.log(`📁 Session directory: ${sessionDir}`);
-    console.log(`🌐 Server port: ${PORT}`);
-    
-    try {
-        const socket = await connectToWhatsApp();
-        console.log('🤖 Bot is ready!');
-        return socket;
-    } catch (error) {
-        console.error('❌ Failed to start bot:', error);
+        // Credentials update handler
+        socket.ev.on('creds.update', saveCreds);
         
-        // Retry after delay
-        console.log('🔄 Retrying in 15 seconds...');
-        setTimeout(startBot, 15000);
+        // Add all event handlers from original index.js
+        socket.ev.on("messages.upsert", async chatUpdate => await Handler(chatUpdate, socket, logger));
+        socket.ev.on("call", async (json) => await Callupdate(json, socket));
+        socket.ev.on("group-participants.update", async (messag) => await GroupUpdate(socket, messag));
+
+        // Mode configuration
+        if (config.MODE === "public") {
+            socket.public = true;
+        } else if (config.MODE === "private") {
+            socket.public = false;
+        }
+
+        // Auto Reaction to chats (from original index.js)
+        socket.ev.on('messages.upsert', async (chatUpdate) => {
+            try {
+                const mek = chatUpdate.messages[0];
+                if (!mek.key.fromMe && config.AUTO_REACT) {
+                    if (mek.message) {
+                        const randomEmoji = emojis[Math.floor(Math.random() * emojis.length)];
+                        await doReact(randomEmoji, mek, socket);
+                    }
+                }
+            } catch (err) {
+                console.error('Error during auto reaction:', err);
+            }
+        });
+
+        // Auto Like Status (from original index.js)
+        socket.ev.on('messages.upsert', async (chatUpdate) => {
+            try {
+                const mek = chatUpdate.messages[0];
+                if (!mek || !mek.message) return;
+
+                const contentType = getContentType(mek.message);
+                mek.message = (contentType === 'ephemeralMessage')
+                    ? mek.message.ephemeralMessage.message
+                    : mek.message;
+
+                if (mek.key.remoteJid === 'status@broadcast' && config.AUTO_STATUS_REACT === "true") {
+                    const jawadlike = await socket.decodeJid(socket.user.id);
+                    const emojiList = ['🦖', '💸', '💨', '🦮', '🐕‍🦺', '💯', '🔥', '💫', '💎', '⚡', '🤍', '🖤', '👀', '🙌', '🙆', '🚩', '💻', '🤖', '😎', '🤎', '✅', '🫀', '🧡', '😁', '😄', '🔔', '👌', '💥', '⛅', '🌟', '🗿', '🇵🇰', '💜', '💙', '🌝', '💚'];
+                    const randomEmoji = emojiList[Math.floor(Math.random() * emojiList.length)];
+
+                    await socket.sendMessage(mek.key.remoteJid, {
+                        react: {
+                            text: randomEmoji,
+                            key: mek.key,
+                        }
+                    }, { statusJidList: [mek.key.participant, jawadlike] });
+
+                    console.log(`Auto-reacted to a status with: ${randomEmoji}`);
+                }
+            } catch (err) {
+                console.error("Auto Like Status Error:", err);
+            }
+        });
+
+        return socket;
+
+    } catch (error) {
+        console.error('Critical Error:', error);
+        
+        // Check for Bad MAC error
+        if (error.message?.includes('Bad MAC') || 
+            error.message?.includes('bad-mac') || 
+            error.message?.includes('decrypt')) {
+            console.log('🔧 Bad MAC error detected, cleaning up and retrying...');
+            await handleBadMacError();
+            await delay(5000);
+            await start();
+        } else {
+            // Wait and retry for other errors
+            console.log('🔄 Connection failed, retrying in 10 seconds...');
+            await delay(10000);
+            await start();
+        }
     }
 }
 
-// Setup Express server routes
-app.get('/', (req, res) => {
-    res.send(`
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>WhatsApp Bot - Cloud Ai</title>
-            <style>
-                body {
-                    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-                    margin: 0;
-                    padding: 20px;
-                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                    min-height: 100vh;
-                    color: white;
-                }
-                .container {
-                    max-width: 800px;
-                    margin: 0 auto;
-                    background: rgba(255, 255, 255, 0.1);
-                    padding: 30px;
-                    border-radius: 15px;
-                    backdrop-filter: blur(10px);
-                    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
-                }
-                h1 {
-                    text-align: center;
-                    margin-bottom: 30px;
-                    font-size: 2.5em;
-                    text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.3);
-                }
-                .status {
-                    background: rgba(255, 255, 255, 0.2);
-                    padding: 20px;
-                    border-radius: 10px;
-                    margin-bottom: 20px;
-                }
-                .instructions {
-                    background: rgba(0, 0, 0, 0.2);
-                    padding: 20px;
-                    border-radius: 10px;
-                    margin-top: 20px;
-                }
-                code {
-                    background: rgba(0, 0, 0, 0.3);
-                    padding: 10px 15px;
-                    border-radius: 5px;
-                    display: block;
-                    margin: 10px 0;
-                    font-family: monospace;
-                    font-size: 1.2em;
-                    text-align: center;
-                }
-                .footer {
-                    text-align: center;
-                    margin-top: 30px;
-                    opacity: 0.8;
-                    font-size: 0.9em;
-                }
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <h1>🤖 WhatsApp Bot - Cloud Ai</h1>
-                
-                <div class="status">
-                    <h2>🟢 Bot Status: Running</h2>
-                    <p><strong>Port:</strong> ${PORT}</p>
-                    <p><strong>Authentication:</strong> Pairing Code</p>
-                    <p><strong>Session:</strong> Local Storage</p>
-                    <p><strong>Prefix:</strong> ${prefix}</p>
-                </div>
-                
-                <div class="instructions">
-                    <h3>📱 Pairing Instructions:</h3>
-                    <p>If this is your first time running the bot:</p>
-                    <ol>
-                        <li>Check the console for the pairing code</li>
-                        <li>Open WhatsApp on your phone</li>
-                        <li>Go to Settings → Linked Devices</li>
-                        <li>Tap "Link a Device"</li>
-                        <li>Enter the code shown in console</li>
-                    </ol>
-                    
-                    <h3>📝 Available Commands:</h3>
-                    <ul>
-                        <li><code>${prefix}ping</code> - Check if bot is alive</li>
-                        <li><code>${prefix}hello</code> - Greet the bot</li>
-                        <li><code>${prefix}help</code> - Show help message</li>
-                    </ul>
-                    
-                    <p><em>Note: The bot will automatically reconnect if disconnected.</em></p>
-                </div>
-                
-                <div class="footer">
-                    <p>Developed by BRUCE BERA | Cloud Ai Bot</p>
-                </div>
-            </div>
-        </body>
-        </html>
-    `);
-});
+async function start() {
+    console.log('🚀 Starting WhatsApp bot with pairing-based authentication...');
+    console.log(`📁 Session directory: ${sessionDir}`);
+    
+    try {
+        await createWhatsAppConnection();
+    } catch (error) {
+        console.error('Failed to start:', error);
+        process.exit(1);
+    }
+}
 
-// Health check endpoint
-app.get('/health', (req, res) => {
+// Express server setup (simplified - no index.html)
+app.get('/', (req, res) => {
     res.json({
-        status: 'ok',
-        timestamp: new Date().toISOString(),
+        status: 'running',
         service: 'whatsapp-bot',
-        version: '1.0.0'
+        version: '1.0.0',
+        authentication: 'pairing-based',
+        session: 'local-storage'
     });
 });
 
-// Start server
 app.listen(PORT, () => {
-    console.log(`🌐 Web server running on port ${PORT}`);
-    console.log(`🔗 Access at: http://localhost:${PORT}`);
-    console.log(`🔗 Health check: http://localhost:${PORT}/health`);
+    console.log(`Server is running on port ${PORT}`);
 });
 
 // Start the bot
-startBot();
+start();
 
-// Handle graceful shutdown
+// Handle process signals
 process.on('SIGINT', () => {
     console.log('\n🛑 Received SIGINT, shutting down gracefully...');
     process.exit(0);
@@ -442,12 +383,4 @@ process.on('SIGINT', () => {
 process.on('SIGTERM', () => {
     console.log('\n🛑 Received SIGTERM, shutting down gracefully...');
     process.exit(0);
-});
-
-process.on('uncaughtException', (error) => {
-    console.error('❌ Uncaught exception:', error);
-});
-
-process.on('unhandledRejection', (reason, promise) => {
-    console.error('❌ Unhandled rejection at:', promise, 'reason:', reason);
 });
