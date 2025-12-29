@@ -2,7 +2,6 @@ const path = require('path');
 const pino = require('pino');
 const { makeWASocket, fetchLatestBaileysVersion, DisconnectReason } = require('@whiskeysockets/baileys');
 const NodeCache = require('node-cache');
-const chalk = require('chalk');
 
 class BotRunner {
     constructor(sessionId, authState) {
@@ -16,7 +15,7 @@ class BotRunner {
 
     async start() {
         try {
-            console.log(chalk.blue(`🤖 Starting bot for session: ${this.sessionId}`));
+            console.log(`🤖 Starting bot for session: ${this.sessionId}`);
             
             const { version } = await fetchLatestBaileysVersion();
             
@@ -45,7 +44,7 @@ class BotRunner {
             this.setupEventHandlers();
             
             this.isRunning = true;
-            console.log(chalk.green(`✅ Bot started successfully for session: ${this.sessionId}`));
+            console.log(`✅ Bot started successfully for session: ${this.sessionId}`);
             
             // Send welcome message
             await this.sendWelcomeMessage();
@@ -53,7 +52,7 @@ class BotRunner {
             return this.socket;
             
         } catch (error) {
-            console.error(chalk.red(`❌ Failed to start bot for ${this.sessionId}:`), error);
+            console.error(`❌ Failed to start bot for ${this.sessionId}:`, error);
             throw error;
         }
     }
@@ -66,20 +65,20 @@ class BotRunner {
             const { connection, lastDisconnect } = update;
             if (connection === 'close') {
                 if (lastDisconnect.error?.output?.statusCode !== DisconnectReason.loggedOut) {
-                    console.log(chalk.yellow(`♻️ Reconnecting bot ${this.sessionId}...`));
+                    console.log(`♻️ Reconnecting bot ${this.sessionId}...`);
                     setTimeout(() => this.reconnect(), 5000);
                 } else {
-                    console.log(chalk.red(`❌ Bot ${this.sessionId} logged out`));
+                    console.log(`❌ Bot ${this.sessionId} logged out`);
                     this.stop();
                 }
             } else if (connection === 'open') {
-                console.log(chalk.green(`✅ Bot ${this.sessionId} connected successfully!`));
+                console.log(`✅ Bot ${this.sessionId} connected successfully!`);
             }
         });
 
         // Creds update handler
         socket.ev.on('creds.update', async (creds) => {
-            console.log(chalk.cyan(`🔑 Creds updated for ${this.sessionId}`));
+            console.log(`🔑 Creds updated for ${this.sessionId}`);
         });
 
         // Message handler
@@ -260,7 +259,7 @@ class BotRunner {
                 text: welcomeMsg
             });
             
-            console.log(chalk.green(`📨 Welcome message sent for ${this.sessionId}`));
+            console.log(`📨 Welcome message sent for ${this.sessionId}`);
         } catch (error) {
             console.error('Error sending welcome message:', error);
         }
@@ -285,7 +284,7 @@ class BotRunner {
         if (global.activeBots && global.activeBots[this.sessionId]) {
             delete global.activeBots[this.sessionId];
         }
-        console.log(chalk.yellow(`🛑 Bot stopped: ${this.sessionId}`));
+        console.log(`🛑 Bot stopped: ${this.sessionId}`);
     }
 
     getStatus() {
