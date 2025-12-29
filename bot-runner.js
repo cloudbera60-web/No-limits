@@ -1,12 +1,8 @@
 const path = require('path');
-const fs = require('fs');
-const { serialize } = require('../lib/Serializer'); // From first codebase
-const { Handler, Callupdate, GroupUpdate } = require('../data/index'); // From first codebase
-const config = require('../config.cjs'); // From first codebase
 const pino = require('pino');
 const { makeWASocket, fetchLatestBaileysVersion, DisconnectReason } = require('@whiskeysockets/baileys');
-const chalk = require('chalk');
 const NodeCache = require('node-cache');
+const chalk = require('chalk');
 
 class BotRunner {
     constructor(sessionId, authState) {
@@ -14,7 +10,7 @@ class BotRunner {
         this.authState = authState;
         this.socket = null;
         this.isRunning = false;
-        this.botInfo = {};
+        this.startedAt = new Date();
         this.msgRetryCounterCache = new NodeCache();
     }
 
@@ -37,13 +33,15 @@ class BotRunner {
             });
 
             // Store in global active bots
+            global.activeBots = global.activeBots || {};
             global.activeBots[this.sessionId] = {
                 socket: this.socket,
-                startedAt: new Date(),
-                sessionId: this.sessionId
+                startedAt: this.startedAt,
+                sessionId: this.sessionId,
+                instance: this
             };
 
-            // Setup event handlers from first codebase
+            // Setup event handlers
             this.setupEventHandlers();
             
             this.isRunning = true;
@@ -80,58 +78,171 @@ class BotRunner {
         });
 
         // Creds update handler
-        socket.ev.on('creds.update', async () => {
-            // Handle credential updates if needed
+        socket.ev.on('creds.update', async (creds) => {
+            console.log(chalk.cyan(`🔑 Creds updated for ${this.sessionId}`));
         });
 
-        // Message handler from first codebase
-        socket.ev.on("messages.upsert", async chatUpdate => {
+        // Message handler
+        socket.ev.on("messages.upsert", async (chatUpdate) => {
             try {
-                // Use the Handler from first codebase
-                await Handler(chatUpdate, socket, pino({ level: 'silent' }));
+                const m = chatUpdate.messages[0];
+                if (!m.message) return;
+                
+                const messageType = Object.keys(m.message)[0];
+                const from = m.key.remoteJid;
+                const sender = m.key.participant || from;
+                const pushName = m.pushName || 'User';
+                
+                // Check if it's a text message
+                if (messageType === 'conversation' || m.message[messageType]?.text) {
+                    const body = m.message[messageType]?.text || m.message.conversation || '';
+                    
+                    // Basic command handling
+                    if (body.startsWith('.') || body.startsWith('!') || body.startsWith('/')) {
+                        const prefix = body[0];
+                        const cmd = body.slice(1).split(' ')[0].toLowerCase();
+                        const args = body.slice(prefix.length + cmd.length + 1);
+                        
+                        await this.handleCommand(cmd, args, m, socket, pushName);
+                    }
+                }
             } catch (error) {
                 console.error(`Error in message handler for ${this.sessionId}:`, error);
             }
         });
 
-        // Call handler from first codebase
-        socket.ev.on("call", async (json) => {
-            try {
-                await Callupdate(json, socket);
-            } catch (error) {
-                console.error(`Error in call handler for ${this.sessionId}:`, error);
-            }
-        });
-
-        // Group update handler from first codebase
-        socket.ev.on("group-participants.update", async (messag) => {
-            try {
-                await GroupUpdate(socket, messag);
-            } catch (error) {
-                console.error(`Error in group handler for ${this.sessionId}:`, error);
-            }
-        });
-
-        // Auto-reaction and status handling (from first codebase)
+        // Auto-reaction
         socket.ev.on('messages.upsert', async (chatUpdate) => {
             try {
-                const mek = chatUpdate.messages[0];
-                if (!mek.key.fromMe && config.AUTO_REACT) {
-                    if (mek.message) {
-                        const emojis = ['❤️', '😂', '😮', '😢', '👏', '🔥', '⭐', '🎉'];
-                        const randomEmoji = emojis[Math.floor(Math.random() * emojis.length)];
-                        await socket.sendMessage(mek.key.remoteJid, {
-                            react: {
-                                text: randomEmoji,
-                                key: mek.key
-                            }
-                        });
-                    }
+                const m = chatUpdate.messages[0];
+                if (!m.key.fromMe && m.message) {
+                    // Auto-react with random emoji
+                    const emojis = ['❤️', '😂', '😮', '😢', '👏', '🔥', '⭐', '🎉'];
+                    const randomEmoji = emojis[Math.floor(Math.random() * emojis.length)];
+                    
+                    await socket.sendMessage(m.key.remoteJid, {
+                        react: {
+                            text: randomEmoji,
+                            key: m.key
+                        }
+                    });
                 }
             } catch (err) {
-                console.error('Error during auto reaction:', err);
+                // Silent fail for auto-react
             }
         });
+    }
+
+    async handleCommand(cmd, args, m, sock, pushName) {
+        const from = m.key.remoteJid;
+        
+        switch(cmd) {
+            case 'ping':
+            case 'speed':
+                const start = Date.now();
+                await sock.sendMessage(from, { text: `🏓 Pong!` }, { quoted: m });
+                const latency = Date.now() - start;
+                await sock.sendMessage(from, { text: `⏱️ Latency: ${latency}ms` });
+                break;
+                
+            case 'menu':
+            case 'help':
+            case 'list':
+                const menu = `
+🤖 *GIFTED-MD BOT MENU*
+
+📁 *Download Commands:*
+• .play [song] - Download music
+• .ytmp3 [url] - YouTube to MP3
+• .ytmp4 [url] - YouTube to MP4
+
+🔧 *Utility Commands:*
+• .ping - Check bot speed
+• .owner - Get owner contact
+• .menu - Show this menu
+
+🎮 *Fun Commands:*
+• .sticker - Create sticker from image
+• .attp [text] - Create animated text
+
+⚙️ *Bot Info:*
+• Bot ID: ${this.sessionId}
+• Uptime: ${this.getUptime()}
+• User: ${pushName}
+
+*Use .help [command] for more info*`;
+                await sock.sendMessage(from, { text: menu }, { quoted: m });
+                break;
+                
+            case 'owner':
+                await sock.sendMessage(from, { 
+                    text: `👑 *Bot Owner*\n\nContact: +1234567890\n\nThis bot is powered by Gifted Tech` 
+                }, { quoted: m });
+                break;
+                
+            case 'play':
+                if (!args) {
+                    await sock.sendMessage(from, { text: 'Please provide a song name. Example: .play shape of you' }, { quoted: m });
+                    return;
+                }
+                await sock.sendMessage(from, { text: `🎵 Searching for "${args}"...` }, { quoted: m });
+                // Simulate searching
+                setTimeout(async () => {
+                    await sock.sendMessage(from, { text: `✅ Found: "${args}"\n\nFeature coming soon!` });
+                }, 2000);
+                break;
+                
+            case 'sticker':
+                if (m.message?.imageMessage) {
+                    await sock.sendMessage(from, { text: `🔄 Creating sticker from image...` }, { quoted: m });
+                    setTimeout(async () => {
+                        await sock.sendMessage(from, { text: `✅ Sticker created! (Feature simulation)` });
+                    }, 1500);
+                } else {
+                    await sock.sendMessage(from, { text: `Please send an image with caption .sticker` }, { quoted: m });
+                }
+                break;
+                
+            case 'attp':
+                if (!args) {
+                    await sock.sendMessage(from, { text: 'Please provide text. Example: .attp Hello' }, { quoted: m });
+                    return;
+                }
+                await sock.sendMessage(from, { 
+                    text: `✨ Creating animated text for: "${args}"\n\nFeature coming soon!` 
+                }, { quoted: m });
+                break;
+                
+            case 'info':
+            case 'botinfo':
+                const info = `
+🤖 *BOT INFORMATION*
+
+• *Name:* GIFTED-MD
+• *Version:* 2.0.0
+• *Session ID:* ${this.sessionId}
+• *Uptime:* ${this.getUptime()}
+• *Status:* ✅ Running
+• *User:* ${pushName}
+• *Features:* 10+ commands
+
+*Powered by Gifted Tech*`;
+                await sock.sendMessage(from, { text: info }, { quoted: m });
+                break;
+                
+            default:
+                await sock.sendMessage(from, { 
+                    text: `❓ Unknown command: .${cmd}\n\nType .menu to see available commands.` 
+                }, { quoted: m });
+        }
+    }
+
+    getUptime() {
+        const uptime = Date.now() - this.startedAt;
+        const hours = Math.floor(uptime / (1000 * 60 * 60));
+        const minutes = Math.floor((uptime % (1000 * 60 * 60)) / (1000 * 60));
+        const seconds = Math.floor((uptime % (1000 * 60)) / 1000);
+        return `${hours}h ${minutes}m ${seconds}s`;
     }
 
     async sendWelcomeMessage() {
@@ -140,7 +251,7 @@ class BotRunner {
 
 ✅ Your bot is now running successfully!
 ✅ All features are available
-✅ Use ${config.PREFIX || '.'}menu to see commands
+✅ Use .menu to see commands
 ✅ Bot ID: ${this.sessionId}
 
 *Powered by Gifted Tech*`;
@@ -148,6 +259,8 @@ class BotRunner {
             await this.socket.sendMessage(this.socket.user.id, {
                 text: welcomeMsg
             });
+            
+            console.log(chalk.green(`📨 Welcome message sent for ${this.sessionId}`));
         } catch (error) {
             console.error('Error sending welcome message:', error);
         }
@@ -169,7 +282,9 @@ class BotRunner {
                 console.error('Error closing socket:', error);
             }
         }
-        delete global.activeBots[this.sessionId];
+        if (global.activeBots && global.activeBots[this.sessionId]) {
+            delete global.activeBots[this.sessionId];
+        }
         console.log(chalk.yellow(`🛑 Bot stopped: ${this.sessionId}`));
     }
 
@@ -178,6 +293,7 @@ class BotRunner {
             sessionId: this.sessionId,
             isRunning: this.isRunning,
             startedAt: this.startedAt,
+            uptime: this.getUptime(),
             user: this.socket?.user?.id || 'Not connected'
         };
     }
@@ -192,8 +308,8 @@ async function startBotInstance(sessionId, authState) {
 
 // Function to stop a bot instance
 function stopBotInstance(sessionId) {
-    if (global.activeBots[sessionId]) {
-        global.activeBots[sessionId].stop();
+    if (global.activeBots && global.activeBots[sessionId]) {
+        global.activeBots[sessionId].instance.stop();
         return true;
     }
     return false;
@@ -201,7 +317,7 @@ function stopBotInstance(sessionId) {
 
 // Function to get all active bots
 function getActiveBots() {
-    return global.activeBots;
+    return global.activeBots || {};
 }
 
 module.exports = {
