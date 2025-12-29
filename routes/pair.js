@@ -25,6 +25,7 @@ router.get('/', async (req, res) => {
     let num = req.query.number;
     let responseSent = false;
     let botInstance = null;
+    let pairingSocket = null; // Store the socket for reconnection
 
     // Create session directory if it doesn't exist
     if (!fs.existsSync(sessionDir)) {
@@ -36,7 +37,7 @@ router.get('/', async (req, res) => {
         const { state, saveCreds } = await useMultiFileAuthState(path.join(sessionDir, id));
         
         try {
-            let Gifted = giftedConnect({
+            pairingSocket = giftedConnect({
                 version,
                 auth: {
                     creds: state.creds,
@@ -54,12 +55,12 @@ router.get('/', async (req, res) => {
                 keepAliveIntervalMs: 30000
             });
 
-            if (!Gifted.authState.creds.registered) {
+            if (!pairingSocket.authState.creds.registered) {
                 await delay(1500);
                 num = num.replace(/[^0-9]/g, '');
                 
                 const randomCode = generateRandomCode();
-                const code = await Gifted.requestPairingCode(num, randomCode);
+                const code = await pairingSocket.requestPairingCode(num, randomCode);
                 
                 if (!responseSent && !res.headersSent) {
                     res.json({ 
@@ -71,9 +72,9 @@ router.get('/', async (req, res) => {
                 }
             }
 
-            Gifted.ev.on('creds.update', saveCreds);
+            pairingSocket.ev.on('creds.update', saveCreds);
             
-            Gifted.ev.on("connection.update", async (s) => {
+            pairingSocket.ev.on("connection.update", async (s) => {
                 const { connection, lastDisconnect } = s;
 
                 if (connection === "open") {
@@ -84,31 +85,37 @@ router.get('/', async (req, res) => {
                         botInstance = await startBotInstance(id, state);
                         
                         // Send success notification
-                        await Gifted.sendMessage(Gifted.user.id, {
+                        await pairingSocket.sendMessage(pairingSocket.user.id, {
                             text: `✅ *GIFTED-MD Bot Activated!*\n\nYour bot is now running with full functionality!\n\nUse commands like .menu to get started.\n\nBot ID: ${id}`
                         });
                         
-                        // Wait a moment then close the pairing socket
+                        // Wait a moment then close the pairing socket (not the bot!)
                         await delay(3000);
-                        await Gifted.ws.close();
+                        await pairingSocket.ws.close();
                         
-                        // Clean up session directory
+                        // Clean up session directory (optional)
                         await removeFile(path.join(sessionDir, id));
                         
                     } catch (botError) {
                         console.error(`❌ Failed to start bot for ${id}:`, botError);
                         
-                        await Gifted.sendMessage(Gifted.user.id, {
+                        await pairingSocket.sendMessage(pairingSocket.user.id, {
                             text: `❌ *Bot Startup Failed*\n\nFailed to initialize bot features.\n\nError: ${botError.message}`
                         });
                         
-                        await Gifted.ws.close();
+                        await pairingSocket.ws.close();
                         await removeFile(path.join(sessionDir, id));
                     }
                     
-                } else if (connection === "close" && lastDisconnect && lastDisconnect.error && lastDisconnect.error.output.statusCode != 401) {
-                    console.log("Pairing connection closed, not reconnecting...");
-                    await removeFile(path.join(sessionDir, id));
+                } else if (connection === "close") {
+                    if (lastDisconnect && lastDisconnect.error && lastDisconnect.error.output.statusCode != 401) {
+                        console.log("Pairing connection closed, attempting to reconnect...");
+                        await delay(5000);
+                        GIFTED_PAIR_CODE(); // RECONNECTION LOGIC
+                    } else {
+                        console.log("Pairing connection closed normally");
+                        await removeFile(path.join(sessionDir, id));
+                    }
                 }
             });
 
