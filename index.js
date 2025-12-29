@@ -8,7 +8,7 @@ const {
   qrRoute,
   pairRoute
 } = require('./routes');
-const { startBotInstance } = require('./bot-runner');
+const { startBotInstance } = require('./bot-runner/index.js');
 require('events').EventEmitter.defaultMaxListeners = 2000;
 
 app.use(bodyParser.json());
