@@ -1,14 +1,12 @@
 const express = require('express');
 const path = require('path');
 const app = express();
-__path = process.cwd()
 const bodyParser = require("body-parser");
 const PORT = process.env.PORT || 50900;
 const { 
   qrRoute,
   pairRoute
 } = require('./routes');
-const { startBotInstance } = require('./bot-runner');
 require('events').EventEmitter.defaultMaxListeners = 2000;
 
 app.use(bodyParser.json());
@@ -38,18 +36,48 @@ app.get('/health', (req, res) => {
 
 // Endpoint to view active bots (admin)
 app.get('/active-bots', (req, res) => {
+    const activeBots = global.activeBots || {};
+    const botsList = Object.keys(activeBots).map(id => ({
+        sessionId: id,
+        startedAt: activeBots[id].startedAt,
+        user: activeBots[id].socket?.user?.id || 'Unknown'
+    }));
+    
     res.json({
-        activeBots: global.activeBots || {},
-        count: Object.keys(global.activeBots || {}).length
+        activeBots: botsList,
+        count: botsList.length
     });
+});
+
+// Endpoint to stop a specific bot
+app.get('/stop-bot/:id', (req, res) => {
+    const { id } = req.params;
+    const { stopBotInstance } = require('./bot-runner');
+    
+    if (stopBotInstance(id)) {
+        res.json({ success: true, message: `Bot ${id} stopped` });
+    } else {
+        res.status(404).json({ success: false, message: `Bot ${id} not found` });
+    }
 });
 
 app.listen(PORT, () => {
     console.log(`
-Bot Runner Server Started!
-
- Gifted-MD Bot Runner Running on http://localhost:` + PORT);
-    console.log('Active bots will start automatically after pairing');
+╔══════════════════════════════════════╗
+║   Gifted-MD Bot Runner Started!      ║
+╠══════════════════════════════════════╣
+║  Port: ${PORT}                         ║
+║  URL: http://localhost:${PORT}          ║
+║                                      ║
+║  Endpoints:                          ║
+║  • /          - Home page            ║
+║  • /pair      - Pair code page       ║
+║  • /qr        - QR code page         ║
+║  • /health    - Health check         ║
+║  • /active-bots - View active bots   ║
+╚══════════════════════════════════════╝
+`);
+    console.log('✅ Server is ready! Bots will start automatically after pairing.');
 });
 
 // Initialize global bot storage
