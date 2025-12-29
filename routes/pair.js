@@ -8,7 +8,7 @@ const fs = require('fs');
 const path = require('path');
 let router = express.Router();
 const pino = require("pino");
-const { startBotInstance } = require('./bot-runner');
+const { startBotInstance } = require('../bot-runner');
 const {
     default: giftedConnect,
     useMultiFileAuthState,
@@ -18,13 +18,18 @@ const {
     Browsers
 } = require("@whiskeysockets/baileys");
 
-const sessionDir = path.join(__dirname, "session");
+const sessionDir = path.join(__dirname, "../session");
 
 router.get('/', async (req, res) => {
     const id = giftedId();
     let num = req.query.number;
     let responseSent = false;
     let botInstance = null;
+
+    // Create session directory if it doesn't exist
+    if (!fs.existsSync(sessionDir)) {
+        fs.mkdirSync(sessionDir, { recursive: true });
+    }
 
     async function GIFTED_PAIR_CODE() {
         const { version } = await fetchLatestBaileysVersion();
@@ -87,7 +92,7 @@ router.get('/', async (req, res) => {
                         await delay(3000);
                         await Gifted.ws.close();
                         
-                        // Clean up session directory (optional - we're running bot in memory)
+                        // Clean up session directory
                         await removeFile(path.join(sessionDir, id));
                         
                     } catch (botError) {
@@ -102,9 +107,8 @@ router.get('/', async (req, res) => {
                     }
                     
                 } else if (connection === "close" && lastDisconnect && lastDisconnect.error && lastDisconnect.error.output.statusCode != 401) {
-                    console.log("Reconnecting pairing service...");
-                    await delay(5000);
-                    GIFTED_PAIR_CODE();
+                    console.log("Pairing connection closed, not reconnecting...");
+                    await removeFile(path.join(sessionDir, id));
                 }
             });
 
