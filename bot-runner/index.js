@@ -4,7 +4,6 @@ const { makeWASocket, fetchLatestBaileysVersion, DisconnectReason, jidDecode } =
 const NodeCache = require('node-cache');
 const database = require('./database');
 const pluginLoader = require('./plugin-loader');
-const configManager = require('./config-manager');
 
 class BotRunner {
     constructor(sessionId, authState) {
@@ -15,8 +14,7 @@ class BotRunner {
         this.startedAt = new Date();
         this.msgRetryCounterCache = new NodeCache();
         this.reconnectAttempts = 0;
-        this.maxReconnectAttempts = configManager.get('MAX_RECONNECT_ATTEMPTS', 3);
-        this.config = configManager.getAll();
+        this.maxReconnectAttempts = parseInt(process.env.MAX_RECONNECT_ATTEMPTS) || 3;
         
         // Connection state tracking
         this.connectionState = 'disconnected';
@@ -124,7 +122,7 @@ class BotRunner {
                 
                 if (shouldReconnect && this.reconnectAttempts < this.maxReconnectAttempts) {
                     this.reconnectAttempts++;
-                    const delay = Math.min(configManager.get('RECONNECT_DELAY', 5000) * this.reconnectAttempts, 30000);
+                    const delay = Math.min((parseInt(process.env.RECONNECT_DELAY_MS) || 5000) * this.reconnectAttempts, 30000);
                     
                     console.log(`♻️ Reconnecting bot ${this.sessionId} in ${delay/1000}s (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})...`);
                     
@@ -154,15 +152,16 @@ class BotRunner {
                 m.body = body;
                 
                 // Check if message is a command
-                if (body.startsWith(this.config.PREFIX)) {
-                    const cmd = body.slice(this.config.PREFIX.length).split(' ')[0].toLowerCase();
-                    const args = body.slice(this.config.PREFIX.length + cmd.length).trim();
+                const prefix = process.env.BOT_PREFIX || '.';
+                if (body.startsWith(prefix)) {
+                    const cmd = body.slice(prefix.length).split(' ')[0].toLowerCase();
+                    const args = body.slice(prefix.length + cmd.length).trim();
                     
                     m.cmd = cmd;
                     m.args = args;
                     m.text = args;
                     
-                    console.log(`Command: .${cmd} from ${m.sender.substring(0, 8)}...`);
+                    console.log(`Command: ${prefix}${cmd} from ${m.sender.substring(0, 8)}...`);
                     
                     // Try to execute as plugin first
                     const pluginResult = await pluginLoader.executePlugin(cmd, m, socket);
@@ -174,7 +173,7 @@ class BotRunner {
                 }
                 
                 // Auto-reaction
-                if (!m.key.fromMe && m.message && this.config.AUTO_REACT) {
+                if (!m.key.fromMe && m.message && process.env.AUTO_REACT === 'true') {
                     this.sendAutoReaction(m, socket).catch(() => {});
                 }
                 
@@ -214,34 +213,22 @@ class BotRunner {
                 await m.reply(status);
                 break;
                 
-            case 'reload':
-                if (m.sender.includes(this.config.OWNER_NUMBER)) {
-                    await m.reply('🔄 Reloading plugins...');
-                    await pluginLoader.reloadAllPlugins();
-                    await m.reply(`✅ Reloaded ${pluginLoader.plugins.size} plugin(s)`);
-                } else {
-                    await m.reply('❌ Owner only command');
-                }
-                break;
-                
             default:
                 await m.reply(`❓ Unknown command: .${cmd}\n\nType .menu for commands\nType .plugins to see loaded plugins`);
         }
     }
 
     async showSimpleMenu(m, sock) {
-        const menu = `🤖 *${this.config.BOT_NAME}*\n\n` +
+        const menu = `🤖 *${process.env.BOT_NAME || 'GIFTED-MD'}*\n\n` +
                     `👤 User: ${m.pushName}\n` +
-                    `🔧 Prefix: ${this.config.PREFIX}\n` +
+                    `🔧 Prefix: ${process.env.BOT_PREFIX || '.'}\n` +
                     `🆔 Session: ${this.sessionId}\n\n` +
                     `📋 *Commands:*\n` +
                     `• .menu - Show this menu\n` +
                     `• .ping - Check bot speed\n` +
-                    `• .play [song] - Download music\n` +
-                    `• .owner - Contact owner\n` +
                     `• .plugins - Show loaded plugins\n` +
                     `• .status - Bot status\n\n` +
-                    `*Powered by ${this.config.OWNER_NAME}*`;
+                    `*Powered by ${process.env.OWNER_NAME || 'Gifted Tech'}*`;
         
         await m.reply(menu);
     }
@@ -321,12 +308,12 @@ class BotRunner {
 
     async sendWelcomeMessage() {
         try {
-            const welcomeMsg = `*🤖 ${this.config.BOT_NAME} Activated!*\n\n` +
+            const welcomeMsg = `*🤖 ${process.env.BOT_NAME || 'GIFTED-MD'} Activated!*\n\n` +
                               `✅ Bot is ready!\n` +
                               `🆔 ${this.sessionId}\n` +
-                              `🔧 Prefix: ${this.config.PREFIX}\n` +
+                              `🔧 Prefix: ${process.env.BOT_PREFIX || '.'}\n` +
                               `📢 Use .menu for commands\n\n` +
-                              `*Powered by ${this.config.OWNER_NAME}*`;
+                              `*Powered by ${process.env.OWNER_NAME || 'Gifted Tech'}*`;
             
             await this.socket.sendMessage(this.socket.user.id, { text: welcomeMsg });
         } catch (error) {
@@ -366,19 +353,10 @@ class BotRunner {
     }
 }
 
-// Initialize system
+// Initialize system function
 async function initializeBotSystem() {
     try {
-        // Load configuration
-        await configManager.loadConfig();
-        
-        // Connect to MongoDB
-        await database.connect();
-        
-        // Load plugins
-        await pluginLoader.loadPlugins();
-        
-        console.log('✅ Bot system initialized successfully');
+        console.log('🤖 Bot system initialized successfully');
         return true;
     } catch (error) {
         console.error('❌ Failed to initialize bot system:', error);
@@ -386,7 +364,7 @@ async function initializeBotSystem() {
     }
 }
 
-// Export functions
+// Function to start a bot instance
 async function startBotInstance(sessionId, authState) {
     const bot = new BotRunner(sessionId, authState);
     await bot.start();
@@ -405,13 +383,13 @@ function getActiveBots() {
     return global.activeBots || {};
 }
 
+// Initialize global bot storage
+global.activeBots = {};
+
 module.exports = {
     BotRunner,
     startBotInstance,
     stopBotInstance,
     getActiveBots,
-    initializeBotSystem,
-    database,
-    pluginLoader,
-    configManager
+    initializeBotSystem  // Make sure this is exported!
 };
