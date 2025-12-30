@@ -1,31 +1,40 @@
 const { MongoClient } = require('mongodb');
-const configManager = require('./config-manager');
 
 class Database {
     constructor() {
         this.client = null;
         this.db = null;
         this.isConnected = false;
-        this.config = configManager.getAll();
+        this.config = null;
     }
 
     async connect() {
         try {
-            const mongoUri = this.config.MONGODB_URI;
-            const dbName = this.config.MONGODB_DB_NAME;
-            const sessionTTLDays = this.config.SESSION_TTL_DAYS;
+            // Load config directly from environment
+            const mongoUri = process.env.MONGODB_URI || 'mongodb://localhost:27017';
+            const dbName = process.env.MONGODB_DB_NAME || 'giftedmd';
+            const sessionTTLDays = parseInt(process.env.SESSION_TTL_DAYS) || 7;
+            const nodeEnv = process.env.NODE_ENV || 'development';
             
-            console.log(`🔗 Connecting to MongoDB Atlas...`);
+            console.log(`🔗 Connecting to MongoDB...`);
+            console.log(`📁 Database: ${dbName}`);
+            console.log(`🌐 Environment: ${nodeEnv}`);
+            
+            if (!mongoUri || mongoUri.trim() === '') {
+                throw new Error('MONGODB_URI is not defined in environment variables');
+            }
+            
+            // Log first few characters of URI (for debugging, not full URI for security)
+            console.log(`🔑 MongoDB URI: ${mongoUri.substring(0, 30)}...`);
             
             this.client = new MongoClient(mongoUri, {
                 useNewUrlParser: true,
                 useUnifiedTopology: true,
-                serverSelectionTimeoutMS: 15000, // Increased for Atlas
+                serverSelectionTimeoutMS: 15000,
                 socketTimeoutMS: 45000,
                 connectTimeoutMS: 15000,
-                maxPoolSize: 50, // Increased for multiple bot instances
+                maxPoolSize: 50,
                 minPoolSize: 5,
-                maxIdleTimeMS: 30000,
                 retryWrites: true,
                 w: 'majority'
             });
@@ -39,7 +48,7 @@ class Database {
             this.db = this.client.db(dbName);
             this.isConnected = true;
             
-            console.log(`✅ MongoDB Atlas connected to database: ${dbName}`);
+            console.log(`✅ MongoDB connected to database: ${dbName}`);
             
             // Create collections if they don't exist
             await this.setupCollections(sessionTTLDays);
@@ -49,12 +58,11 @@ class Database {
             
             return true;
         } catch (error) {
-            console.error('❌ MongoDB Atlas connection error:', error.message);
-            console.error('Full error:', error);
-            this.isConnected = false;
+            console.error('❌ MongoDB connection error:', error.message);
             
             // For development, continue without DB
-            if (configManager.isDevelopment()) {
+            const nodeEnv = process.env.NODE_ENV || 'development';
+            if (nodeEnv === 'development') {
                 console.log('⚠️ Continuing without database in development mode');
                 return false;
             }
@@ -66,37 +74,32 @@ class Database {
     }
 
     async setupCollections(sessionTTLDays) {
-        const collections = await this.db.listCollections().toArray();
-        const collectionNames = collections.map(col => col.name);
-        
-        // Create sessions collection with TTL
-        if (!collectionNames.includes('sessions')) {
-            await this.db.createCollection('sessions');
-            console.log('📁 Created sessions collection');
-        }
-        
-        // Create users collection
-        if (!collectionNames.includes('users')) {
-            await this.db.createCollection('users');
-            console.log('📁 Created users collection');
-        }
-        
-        // Create stats collection
-        if (!collectionNames.includes('stats')) {
-            await this.db.createCollection('stats');
-            console.log('📁 Created stats collection');
-        }
-        
-        // Create logs collection
-        if (!collectionNames.includes('logs')) {
-            await this.db.createCollection('logs');
-            console.log('📁 Created logs collection');
-        }
-        
-        // Create command_logs collection
-        if (!collectionNames.includes('command_logs')) {
-            await this.db.createCollection('command_logs');
-            console.log('📁 Created command_logs collection');
+        try {
+            const collections = await this.db.listCollections().toArray();
+            const collectionNames = collections.map(col => col.name);
+            
+            // Create sessions collection with TTL
+            if (!collectionNames.includes('sessions')) {
+                await this.db.createCollection('sessions');
+                console.log('📁 Created sessions collection');
+            }
+            
+            // Create TTL index for sessions
+            await this.db.collection('sessions').createIndex(
+                { updatedAt: 1 },
+                { expireAfterSeconds: sessionTTLDays * 86400 }
+            );
+            
+            // Create other collections if they don't exist
+            const requiredCollections = ['users', 'stats', 'logs', 'command_logs'];
+            for (const collection of requiredCollections) {
+                if (!collectionNames.includes(collection)) {
+                    await this.db.createCollection(collection);
+                    console.log(`📁 Created ${collection} collection`);
+                }
+            }
+        } catch (error) {
+            console.error('Error setting up collections:', error.message);
         }
     }
 
@@ -110,15 +113,12 @@ class Database {
             // Users collection indexes
             await this.db.collection('users').createIndex({ userId: 1 }, { unique: true });
             await this.db.collection('users').createIndex({ lastSeen: 1 });
-            await this.db.collection('users').createIndex({ commandCount: 1 });
             
             // Stats collection indexes
             await this.db.collection('stats').createIndex({ date: 1 }, { unique: true });
-            await this.db.collection('stats').createIndex({ botCount: 1 });
             
             // Logs collection indexes
             await this.db.collection('logs').createIndex({ timestamp: 1 });
-            await this.db.collection('logs').createIndex({ level: 1 });
             
             // Command logs indexes
             await this.db.collection('command_logs').createIndex({ userId: 1 });
@@ -144,8 +144,7 @@ class Database {
                 keys: authState.keys,
                 updatedAt: new Date(),
                 lastActivity: new Date(),
-                // Add metadata for tracking
-                botName: configManager.get('BOT_NAME'),
+                botName: process.env.BOT_NAME || 'GIFTED-MD',
                 createdAt: new Date(),
                 status: 'active'
             };
@@ -159,10 +158,10 @@ class Database {
                 { upsert: true }
             );
             
-            console.log(`💾 Session saved to MongoDB Atlas: ${sessionId}`);
+            console.log(`💾 Session saved to MongoDB: ${sessionId}`);
             return true;
         } catch (error) {
-            console.error('Error saving session to MongoDB Atlas:', error.message);
+            console.error('Error saving session to MongoDB:', error.message);
             return false;
         }
     }
@@ -182,16 +181,16 @@ class Database {
                     { $set: { lastAccessed: new Date() } }
                 );
                 
-                console.log(`📂 Session loaded from MongoDB Atlas: ${sessionId}`);
+                console.log(`📂 Session loaded from MongoDB: ${sessionId}`);
                 return {
                     creds: session.creds,
                     keys: session.keys
                 };
             }
-            console.log(`📭 Session not found in MongoDB Atlas: ${sessionId}`);
+            console.log(`📭 Session not found in MongoDB: ${sessionId}`);
             return null;
         } catch (error) {
-            console.error('Error getting session from MongoDB Atlas:', error.message);
+            console.error('Error getting session from MongoDB:', error.message);
             return null;
         }
     }
@@ -202,115 +201,13 @@ class Database {
         try {
             const result = await this.db.collection('sessions').deleteOne({ sessionId });
             if (result.deletedCount > 0) {
-                console.log(`🗑️ Session deleted from MongoDB Atlas: ${sessionId}`);
+                console.log(`🗑️ Session deleted from MongoDB: ${sessionId}`);
                 return true;
             }
             return false;
         } catch (error) {
-            console.error('Error deleting session from MongoDB Atlas:', error.message);
+            console.error('Error deleting session from MongoDB:', error.message);
             return false;
-        }
-    }
-
-    // Statistics methods
-    async updateBotStats() {
-        if (!this.isConnected) return;
-        
-        try {
-            const today = new Date().toISOString().split('T')[0];
-            const activeBots = global.activeBots || {};
-            const botCount = Object.keys(activeBots).length;
-            
-            await this.db.collection('stats').updateOne(
-                { date: today },
-                { 
-                    $set: { botCount, updatedAt: new Date() },
-                    $inc: { totalConnections: 1 },
-                    $setOnInsert: { date: today, createdAt: new Date() }
-                },
-                { upsert: true }
-            );
-        } catch (error) {
-            // Silent fail for stats
-        }
-    }
-
-    async logCommand(userId, command, success = true) {
-        if (!this.isConnected) return;
-        
-        try {
-            await this.db.collection('command_logs').insertOne({
-                userId,
-                command,
-                success,
-                timestamp: new Date(),
-                botName: configManager.get('BOT_NAME')
-            });
-            
-            // Update user stats
-            await this.db.collection('users').updateOne(
-                { userId },
-                { 
-                    $set: { lastSeen: new Date(), lastCommand: command },
-                    $inc: { 
-                        commandCount: 1,
-                        [`commands.${command}`]: 1,
-                        ...(success ? { successCount: 1 } : { errorCount: 1 })
-                    },
-                    $setOnInsert: { 
-                        userId,
-                        firstSeen: new Date(),
-                        username: userId.split('@')[0]
-                    }
-                },
-                { upsert: true }
-            );
-        } catch (error) {
-            // Silent fail for logging
-        }
-    }
-
-    async getDashboardStats() {
-        if (!this.isConnected) return null;
-        
-        try {
-            const today = new Date().toISOString().split('T')[0];
-            const yesterday = new Date(Date.now() - 86400000).toISOString().split('T')[0];
-            
-            const todayStats = await this.db.collection('stats').findOne({ date: today });
-            const yesterdayStats = await this.db.collection('stats').findOne({ date: yesterday });
-            
-            const totalUsers = await this.db.collection('users').countDocuments();
-            const totalCommands = await this.db.collection('command_logs').countDocuments();
-            const todayCommands = await this.db.collection('command_logs').countDocuments({
-                timestamp: { $gte: new Date(today) }
-            });
-            
-            const topCommands = await this.db.collection('command_logs')
-                .aggregate([
-                    { $group: { _id: "$command", count: { $sum: 1 } } },
-                    { $sort: { count: -1 } },
-                    { $limit: 10 }
-                ])
-                .toArray();
-            
-            const activeUsers = await this.db.collection('users')
-                .countDocuments({ lastSeen: { $gte: new Date(Date.now() - 86400000) } });
-            
-            return {
-                today: todayStats || { botCount: 0, totalConnections: 0 },
-                yesterday: yesterdayStats || { botCount: 0, totalConnections: 0 },
-                totals: {
-                    users: totalUsers,
-                    commands: totalCommands,
-                    todayCommands
-                },
-                activeUsers,
-                topCommands
-            };
-        } catch (error) {
-            console.error('Error getting dashboard stats:', error);
-            return null;
         }
     }
 
@@ -319,9 +216,9 @@ class Database {
             try {
                 await this.client.close();
                 this.isConnected = false;
-                console.log('🔒 MongoDB Atlas connection closed gracefully');
+                console.log('🔒 MongoDB connection closed gracefully');
             } catch (error) {
-                console.error('Error closing MongoDB Atlas connection:', error);
+                console.error('Error closing MongoDB connection:', error);
             }
         }
     }
@@ -332,42 +229,15 @@ const dbInstance = new Database();
 
 // Handle graceful shutdown
 process.on('SIGINT', async () => {
-    console.log('\n🔄 Closing MongoDB connection...');
+    console.log('\n👋 Shutting down gracefully...');
     await dbInstance.close();
     process.exit(0);
 });
 
 process.on('SIGTERM', async () => {
-    console.log('\n🔄 Closing MongoDB connection...');
+    console.log('\n👋 Received termination signal...');
     await dbInstance.close();
     process.exit(0);
 });
-
-// Auto-reconnect logic
-let reconnectAttempts = 0;
-const maxReconnectAttempts = 5;
-
-async function checkConnection() {
-    if (!dbInstance.isConnected && reconnectAttempts < maxReconnectAttempts) {
-        reconnectAttempts++;
-        console.log(`Attempting to reconnect to MongoDB (attempt ${reconnectAttempts}/${maxReconnectAttempts})...`);
-        
-        setTimeout(async () => {
-            try {
-                await dbInstance.connect();
-                reconnectAttempts = 0;
-            } catch (error) {
-                checkConnection();
-            }
-        }, 5000 * reconnectAttempts); // Exponential backoff
-    }
-}
-
-// Start connection monitoring
-setInterval(() => {
-    if (!dbInstance.isConnected) {
-        checkConnection();
-    }
-}, 30000); // Check every 30 seconds
 
 module.exports = dbInstance;
