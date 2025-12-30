@@ -5,7 +5,6 @@ class Database {
         this.client = null;
         this.db = null;
         this.isConnected = false;
-        this.config = null;
     }
 
     async connect() {
@@ -27,9 +26,8 @@ class Database {
             // Log first few characters of URI (for debugging, not full URI for security)
             console.log(`🔑 MongoDB URI: ${mongoUri.substring(0, 30)}...`);
             
+            // Remove deprecated options
             this.client = new MongoClient(mongoUri, {
-                useNewUrlParser: true,
-                useUnifiedTopology: true,
                 serverSelectionTimeoutMS: 15000,
                 socketTimeoutMS: 45000,
                 connectTimeoutMS: 15000,
@@ -53,9 +51,6 @@ class Database {
             // Create collections if they don't exist
             await this.setupCollections(sessionTTLDays);
             
-            // Create indexes
-            await this.createIndexes();
-            
             return true;
         } catch (error) {
             console.error('❌ MongoDB connection error:', error.message);
@@ -78,26 +73,21 @@ class Database {
             const collections = await this.db.listCollections().toArray();
             const collectionNames = collections.map(col => col.name);
             
-            // Create sessions collection with TTL
+            // Create sessions collection if it doesn't exist
             if (!collectionNames.includes('sessions')) {
                 await this.db.createCollection('sessions');
                 console.log('📁 Created sessions collection');
+                
+                // Create TTL index for sessions
+                await this.db.collection('sessions').createIndex(
+                    { updatedAt: 1 },
+                    { expireAfterSeconds: sessionTTLDays * 86400 }
+                );
             }
             
-            // Create TTL index for sessions
-            await this.db.collection('sessions').createIndex(
-                { updatedAt: 1 },
-                { expireAfterSeconds: sessionTTLDays * 86400 }
-            );
+            // Create other indexes
+            await this.createIndexes();
             
-            // Create other collections if they don't exist
-            const requiredCollections = ['users', 'stats', 'logs', 'command_logs'];
-            for (const collection of requiredCollections) {
-                if (!collectionNames.includes(collection)) {
-                    await this.db.createCollection(collection);
-                    console.log(`📁 Created ${collection} collection`);
-                }
-            }
         } catch (error) {
             console.error('Error setting up collections:', error.message);
         }
@@ -107,27 +97,14 @@ class Database {
         try {
             // Sessions collection indexes
             await this.db.collection('sessions').createIndex({ sessionId: 1 }, { unique: true });
-            await this.db.collection('sessions').createIndex({ updatedAt: 1 });
             await this.db.collection('sessions').createIndex({ lastActivity: 1 });
             
-            // Users collection indexes
-            await this.db.collection('users').createIndex({ userId: 1 }, { unique: true });
-            await this.db.collection('users').createIndex({ lastSeen: 1 });
-            
-            // Stats collection indexes
-            await this.db.collection('stats').createIndex({ date: 1 }, { unique: true });
-            
-            // Logs collection indexes
-            await this.db.collection('logs').createIndex({ timestamp: 1 });
-            
-            // Command logs indexes
-            await this.db.collection('command_logs').createIndex({ userId: 1 });
-            await this.db.collection('command_logs').createIndex({ command: 1 });
-            await this.db.collection('command_logs').createIndex({ timestamp: 1 });
-            
-            console.log('✅ Database indexes created');
+            console.log('✅ Database indexes created/verified');
         } catch (error) {
-            console.error('Error creating indexes:', error.message);
+            // Index might already exist, that's ok
+            if (!error.message.includes('already exists')) {
+                console.error('Error creating indexes:', error.message);
+            }
         }
     }
 
