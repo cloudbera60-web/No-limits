@@ -34,6 +34,7 @@ app.get('/', (req, res) => {
 app.get('/health', (req, res) => {
     const pluginLoader = require('./plugin-loader');
     const database = require('./database');
+    const { getActiveBots } = require('./bot-runner');
     
     res.json({
         status: 200,
@@ -41,7 +42,7 @@ app.get('/health', (req, res) => {
         service: 'Gifted-Md Bot Runner',
         environment: process.env.NODE_ENV || 'production',
         timestamp: new Date().toISOString(),
-        activeBots: Object.keys(global.activeBots || {}).length,
+        activeBots: Object.keys(getActiveBots()).length,
         mongoConnected: database.isConnected,
         pluginsLoaded: pluginLoader.plugins ? pluginLoader.plugins.size : 0,
         config: {
@@ -76,7 +77,7 @@ async function startServer() {
         const pluginCount = await pluginLoader.loadPlugins();
         console.log(`✅ ${pluginCount} plugin(s) loaded`);
         
-        // Initialize bot runner
+        // Initialize bot system
         const { initializeBotSystem } = require('./bot-runner');
         const systemReady = await initializeBotSystem();
         
