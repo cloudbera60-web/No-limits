@@ -9,24 +9,18 @@ class Database {
 
     async connect() {
         try {
-            // Load config directly from environment
             const mongoUri = process.env.MONGODB_URI || 'mongodb://localhost:27017';
             const dbName = process.env.MONGODB_DB_NAME || 'giftedmd';
             const sessionTTLDays = parseInt(process.env.SESSION_TTL_DAYS) || 7;
-            const nodeEnv = process.env.NODE_ENV || 'development';
             
             console.log(`🔗 Connecting to MongoDB...`);
-            console.log(`📁 Database: ${dbName}`);
-            console.log(`🌐 Environment: ${nodeEnv}`);
             
             if (!mongoUri || mongoUri.trim() === '') {
                 throw new Error('MONGODB_URI is not defined in environment variables');
             }
             
-            // Log first few characters of URI (for debugging, not full URI for security)
             console.log(`🔑 MongoDB URI: ${mongoUri.substring(0, 30)}...`);
             
-            // Remove deprecated options
             this.client = new MongoClient(mongoUri, {
                 serverSelectionTimeoutMS: 15000,
                 socketTimeoutMS: 45000,
@@ -37,10 +31,7 @@ class Database {
                 w: 'majority'
             });
             
-            // Test connection
             await this.client.connect();
-            
-            // Verify connection
             await this.client.db('admin').command({ ping: 1 });
             
             this.db = this.client.db(dbName);
@@ -48,21 +39,18 @@ class Database {
             
             console.log(`✅ MongoDB connected to database: ${dbName}`);
             
-            // Create collections if they don't exist
+            // Setup collections and indexes
             await this.setupCollections(sessionTTLDays);
             
             return true;
         } catch (error) {
             console.error('❌ MongoDB connection error:', error.message);
             
-            // For development, continue without DB
-            const nodeEnv = process.env.NODE_ENV || 'development';
-            if (nodeEnv === 'development') {
+            if (process.env.NODE_ENV === 'development') {
                 console.log('⚠️ Continuing without database in development mode');
                 return false;
             }
             
-            // For production, we might want to exit or use fallback
             console.log('⚠️ Bot will run without database persistence');
             return false;
         }
@@ -70,22 +58,22 @@ class Database {
 
     async setupCollections(sessionTTLDays) {
         try {
+            // Create sessions collection with TTL
             const collections = await this.db.listCollections().toArray();
             const collectionNames = collections.map(col => col.name);
             
-            // Create sessions collection if it doesn't exist
             if (!collectionNames.includes('sessions')) {
                 await this.db.createCollection('sessions');
                 console.log('📁 Created sessions collection');
                 
-                // Create TTL index for sessions
+                // Create TTL index
                 await this.db.collection('sessions').createIndex(
                     { updatedAt: 1 },
                     { expireAfterSeconds: sessionTTLDays * 86400 }
                 );
             }
             
-            // Create other indexes
+            // Create indexes
             await this.createIndexes();
             
         } catch (error) {
@@ -101,7 +89,6 @@ class Database {
             
             console.log('✅ Database indexes created/verified');
         } catch (error) {
-            // Index might already exist, that's ok
             if (!error.message.includes('already exists')) {
                 console.error('Error creating indexes:', error.message);
             }
@@ -122,18 +109,29 @@ class Database {
                 updatedAt: new Date(),
                 lastActivity: new Date(),
                 botName: process.env.BOT_NAME || 'GIFTED-MD',
-                createdAt: new Date(),
                 status: 'active'
             };
             
-            const result = await this.db.collection('sessions').updateOne(
-                { sessionId },
-                { 
-                    $set: sessionData,
-                    $setOnInsert: { createdAt: new Date() }
-                },
-                { upsert: true }
-            );
+            // Check if session already exists
+            const existingSession = await this.db.collection('sessions').findOne({ sessionId });
+            
+            if (existingSession) {
+                // Update existing session
+                await this.db.collection('sessions').updateOne(
+                    { sessionId },
+                    { 
+                        $set: {
+                            ...sessionData,
+                            creds: authState.creds,
+                            keys: authState.keys
+                        }
+                    }
+                );
+            } else {
+                // Insert new session
+                sessionData.createdAt = new Date();
+                await this.db.collection('sessions').insertOne(sessionData);
+            }
             
             console.log(`💾 Session saved to MongoDB: ${sessionId}`);
             return true;
@@ -201,10 +199,8 @@ class Database {
     }
 }
 
-// Singleton instance
 const dbInstance = new Database();
 
-// Handle graceful shutdown
 process.on('SIGINT', async () => {
     console.log('\n👋 Shutting down gracefully...');
     await dbInstance.close();
