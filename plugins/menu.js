@@ -3,73 +3,71 @@ const fs = require('fs');
 const os = require('os');
 const axios = require('axios');
 
-const menu = async (m, gss) => {
+const getUserStats = async (user) => {
+  // This would normally fetch from a database
+  // For now, return dummy data
+  return { menuCount: 5 };
+};
+
+const menu = async (m, Matrix) => {
+  const body = m.body ? m.body.toLowerCase().trim() : '';
+  
+  // Handle both "menu" command with prefix and direct number selection
   const prefix = process.env.BOT_PREFIX || '.';
-  const cmd = m.body.startsWith(prefix) ? m.body.slice(prefix.length).split(" ")[0].toLowerCase() : "";
-  const mode = process.env.BOT_MODE === 'public' ? 'public' : 'private';
-  const pref = prefix;
+  let cmd = '';
+  let isNumberSelection = false;
+  
+  if (body.startsWith(prefix)) {
+    cmd = body.slice(prefix.length).split(' ')[0].toLowerCase();
+  } else if (/^[1-9]$|^10$/.test(body)) {
+    cmd = body;
+    isNumberSelection = true;
+  } else if (body === 'menu') {
+    cmd = 'menu';
+  } else {
+    return; // Not a menu command
+  }
 
-  const validCommands = ['list', 'help', 'menu'];
+  const currentTime = moment().format('HH');
+  let greeting = "Good Day";
+  if (currentTime < 12) greeting = "Good Morning";
+  else if (currentTime < 18) greeting = "Good Afternoon";
+  else greeting = "Good Evening";
 
-  if (validCommands.includes(cmd)) {
-    // Get time-based greeting
-    const time2 = moment().tz("Asia/Colombo").format("HH:mm:ss");
-    let pushwish = "";
-    if (time2 < "05:00:00") {
-      pushwish = `Good Morning 🌄`;
-    } else if (time2 < "11:00:00") {
-      pushwish = `Good Morning 🌄`;
-    } else if (time2 < "15:00:00") {
-      pushwish = `Good Afternoon 🌤️`;
-    } else if (time2 < "18:00:00") {
-      pushwish = `Good Evening 🌇`;
-    } else if (time2 < "19:00:00") {
-      pushwish = `Good Evening 🌇`;
-    } else {
-      pushwish = `Good Night 🌙`;
-    }
+  const lastUpdated = moment().format('LLLL');
+  const userStats = await getUserStats(m.sender);
 
-    // Bot uptime
-    const uptime = process.uptime();
-    const day = Math.floor(uptime / (24 * 3600));
-    const hours = Math.floor((uptime % (24 * 3600)) / 3600);
-    const minutes = Math.floor((uptime % 3600) / 60);
-    const seconds = Math.floor(uptime % 60);
+  const mainMenu = `
+✨ Welcome to ${process.env.BOT_NAME || 'GIFTED-MD'} ☁️ AI, ${m.pushName || 'User'}! ✨
 
-    const mainMenu = `
-╭───「 *${process.env.BOT_NAME || 'GIFTED-MD'}* 」───✧
-│🎖️ Owner : *${process.env.OWNER_NAME || 'Gifted Tech'}*
-│👤 User : *${m.pushName}*
-│⚡ Baileys : *Multi Device*
-│💻 Type : *NodeJs*
-│🌐 Mode : *${mode}*
-│📱 Platform : *${os.platform()}*
-│🔧 Prefix : [${prefix}]
-│📦 Version : *3.1.0*
-╰───────────────✧
+🖐️ ${greeting}, ${m.pushName || 'User'}! 🎉 Bot is ready to assist you!
 
-> ${pushwish} *${m.pushName}*!
+🕒 Last Updated: ${lastUpdated}
+💻 User Stats: You've used this bot ${userStats.menuCount} times today!
 
-╭───「 *Menu List* 」───✧
-│📥 1. Download Menu      
-│🔄 2. Converter Menu        
-│🤖 3. AI Menu  
-│🔧 4. Tools Menu  
-│👥 5. Group Menu 
-│🔍 6. Search Menu   
-│🏠 7. Main Menu
-│👑 8. Owner Menu 
-│👀 9. Stalk Menu     
-│📢 update
-╰───────────────✧
-> *Reply with the number (1-9)*`;
+🎯 Choose an option below to proceed:
 
+📥 1. DOWNLOAD MENU
+📱 2. CONVERTER MENU
+🤖 3. AI MENU
+🛠️ 4. TOOLS MENU
+👥 5. GROUP MENU
+🔍 6. SEARCH MENU
+🏠 7. MAIN MENU
+🧑‍💻 8. OWNER MENU
+🕵️‍♂️ 9. STALK MENU
+🎨 10. LOGO MENU
+
+✏️ Please reply with a number (1–10) to open the submenu of your choice.`;
+
+  const menuImageUrl = process.env.MENU_IMAGE || 'https://files.catbox.moe/7jt69h.jpg';
+
+  if (cmd === 'menu' && !isNumberSelection) {
     try {
-      // Send menu with image
-      await gss.sendMessage(m.from, {
-        image: { url: process.env.MENU_IMAGE || 'https://gitcdn.giftedtech.co.ke/image/AZO_image.jpg' },
+      await Matrix.sendMessage(m.from, {
+        image: { url: menuImageUrl },
         caption: mainMenu,
-        contextInfo: {
+        contextInfo: { 
           mentionedJid: [m.sender],
           forwardingScore: 999,
           isForwarded: true,
@@ -79,22 +77,182 @@ const menu = async (m, gss) => {
             serverMessageId: 143
           }
         }
-      }, {
-        quoted: m
-      });
-
-      // Send audio
-      await gss.sendMessage(m.from, {
-        audio: { url: 'https://github.com/XdTechPro/KHAN-DATA/raw/refs/heads/main/autovoice/menunew.m4a' },
-        mimetype: 'audio/mp4',
-        ptt: true
       }, { quoted: m });
-
-      console.log(`✅ Menu sent to ${m.sender}`);
     } catch (error) {
-      console.error('Error sending menu:', error);
-      await m.reply('Error sending menu. Please try again.');
+      // Fallback to text if image fails
+      await Matrix.sendMessage(m.from, {
+        text: mainMenu,
+        contextInfo: { mentionedJid: [m.sender] }
+      }, { quoted: m });
     }
+    return;
+  }
+
+  const menus = {
+    "1": `
+🔽 DOWNLOAD MENU 🔽
+• ${prefix}apk
+• ${prefix}play
+• ${prefix}video
+• ${prefix}song
+• ${prefix}mediafire
+• ${prefix}pinterestdl
+• ${prefix}insta
+• ${prefix}ytmp3
+• ${prefix}ytmp4`,
+
+    "2": `
+🔽 CONVERTER MENU 🔽
+• ${prefix}attp
+• ${prefix}ebinary
+• ${prefix}dbinary
+• ${prefix}emojimix
+• ${prefix}mp3
+• ${prefix}url`,
+
+    "3": `
+🔽 AI MENU 🔽
+• ${prefix}ai
+• ${prefix}sheng on/off
+• ${prefix}report
+• ${prefix}deepseek on/off
+• ${prefix}dalle
+• ${prefix}gemini
+• ${prefix}define`,
+
+    "4": `
+🔽 TOOLS MENU 🔽
+• ${prefix}calculator
+• ${prefix}tempmail
+• ${prefix}checkmail
+• ${prefix}elements
+• ${prefix}tts
+• ${prefix}emojimix
+• ${prefix}shorten
+• ${prefix}save`,
+
+    "5": `
+🔽 GROUP MENU 🔽
+• ${prefix}groupinfo
+• ${prefix}hidetag
+• ${prefix}tagall
+• ${prefix}setdesc
+• ${prefix}open
+• ${prefix}close
+• ${prefix}add
+• ${prefix}kick
+• ${prefix}antilink on/off
+• ${prefix}antibot on/off
+• ${prefix}grouplink
+• ${prefix}invite
+• ${prefix}promote
+• ${prefix}poll
+• ${prefix}vcf`,
+
+    "6": `
+🔽 SEARCH MENU 🔽
+• ${prefix}play
+• ${prefix}yts
+• ${prefix}imdb
+• ${prefix}google
+• ${prefix}pinterest
+• ${prefix}wallpaper
+• ${prefix}wikimedia
+• ${prefix}lyrics
+• ${prefix}bible
+• ${prefix}biblebooks`,
+
+    "7": `
+🔽 MAIN MENU 🔽
+• ${prefix}ping
+• ${prefix}alive
+• ${prefix}owner
+• ${prefix}menu
+• ${prefix}about
+• ${prefix}repo`,
+
+    "8": `
+🔽 OWNER MENU 🔽
+• ${prefix}join
+• ${prefix}leave
+• ${prefix}block
+• ${prefix}unblock
+• ${prefix}setppbot
+• ${prefix}pp
+• ${prefix}anticall
+• ${prefix}alwaysonline
+• ${prefix}autoread
+• ${prefix}autotyping
+• ${prefix}autorecording
+• ${prefix}autoreact
+• ${prefix}autobio
+• ${prefix}view
+• ${prefix}del
+• ${prefix}antidelete on/off`,
+
+    "9": `
+🔽 STALK MENU 🔽
+• ${prefix}truecaller
+• ${prefix}instastalk
+• ${prefix}githubstalk`,
+
+    "10": `
+🔽 LOGO MENU 🔽
+• ${prefix}logo
+• ${prefix}hacker
+• ${prefix}blackpink
+• ${prefix}glossysilver
+• ${prefix}naruto
+• ${prefix}digitalglitch
+• ${prefix}pixelglitch
+• ${prefix}star
+• ${prefix}smoke
+• ${prefix}bear
+• ${prefix}neondevil
+• ${prefix}screen
+• ${prefix}nature
+• ${prefix}dragonball
+• ${prefix}frozenchristmas
+• ${prefix}foilballoon
+• ${prefix}colorfulpaint
+• ${prefix}americanflag
+• ${prefix}water
+• ${prefix}underwater
+• ${prefix}dragonfire
+• ${prefix}bokeh
+• ${prefix}snow
+• ${prefix}sand3D
+• ${prefix}pubg
+• ${prefix}horror
+• ${prefix}blood
+• ${prefix}bulb
+• ${prefix}graffiti
+• ${prefix}thunder
+• ${prefix}thunder1
+• ${prefix}womensday
+• ${prefix}valentine
+• ${prefix}graffiti2
+• ${prefix}queencard
+• ${prefix}galaxy
+• ${prefix}pentakill
+• ${prefix}birthdayflower
+• ${prefix}zodiac
+• ${prefix}water3D
+• ${prefix}textlight
+• ${prefix}wall
+• ${prefix}gold
+• ${prefix}glow`
+  };
+
+  if (menus[cmd]) {
+    await Matrix.sendMessage(m.from, {
+      text: menus[cmd],
+      contextInfo: { 
+        mentionedJid: [m.sender],
+        forwardingScore: 999,
+        isForwarded: true
+      }
+    }, { quoted: m });
   }
 };
 
