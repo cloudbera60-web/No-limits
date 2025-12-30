@@ -12,7 +12,13 @@ class PluginLoader {
             // Create plugins directory if it doesn't exist
             await fs.mkdir(this.pluginDir, { recursive: true });
             
+            // Copy default plugins if directory is empty
             const files = await fs.readdir(this.pluginDir);
+            if (files.length === 0) {
+                console.log('📁 No plugins found, creating default plugins...');
+                await this.createDefaultPlugins();
+            }
+            
             const pluginFiles = files.filter(file => file.endsWith('.js'));
             
             console.log(`📦 Found ${pluginFiles.length} plugin(s)`);
@@ -38,9 +44,12 @@ class PluginLoader {
             
             const pluginModule = require(pluginPath);
             
-            if (typeof pluginModule === 'function' || (pluginModule.default && typeof pluginModule.default === 'function')) {
-                const pluginFunc = pluginModule.default || pluginModule;
-                this.plugins.set(pluginName, pluginFunc);
+            if (typeof pluginModule === 'function') {
+                this.plugins.set(pluginName, pluginModule);
+                console.log(`✅ Loaded plugin: ${pluginName}`);
+                return true;
+            } else if (pluginModule.default && typeof pluginModule.default === 'function') {
+                this.plugins.set(pluginName, pluginModule.default);
                 console.log(`✅ Loaded plugin: ${pluginName}`);
                 return true;
             } else {
@@ -70,22 +79,47 @@ class PluginLoader {
 
     getPluginCommands() {
         const commands = {};
-        for (const [name, plugin] of this.plugins) {
-            // You can add metadata to plugins to define their commands
+        for (const [name] of this.plugins) {
             commands[name] = name;
         }
         return commands;
     }
 
-    async reloadPlugin(filename) {
-        const pluginName = path.basename(filename, '.js');
-        this.plugins.delete(pluginName);
-        return await this.loadPlugin(filename);
-    }
+    async createDefaultPlugins() {
+        // Create default plugins if none exist
+        const defaultPlugins = {
+            'menu.js': `const moment = require('moment-timezone');
+const fs = require('fs');
+const os = require('os');
 
-    async reloadAllPlugins() {
-        this.plugins.clear();
-        return await this.loadPlugins();
+module.exports = async (m, gss) => {
+  const prefix = process.env.BOT_PREFIX || '.';
+  const cmd = m.body.startsWith(prefix) ? m.body.slice(prefix.length).split(" ")[0].toLowerCase() : "";
+  
+  if (['menu', 'help', 'list'].includes(cmd)) {
+    const menu = \`🤖 *\${process.env.BOT_NAME || 'GIFTED-MD'}*\\n\\n📋 *Commands:*\\n• .menu - Show this menu\\n• .ping - Check bot speed\\n• .play [song] - Download music\\n• .owner - Contact owner\\n• .repo - Bot repository\\n\\n*Powered by \${process.env.OWNER_NAME || 'Gifted Tech'}*\`;
+    await m.reply(menu);
+  }
+};`,
+            
+            'ping.js': `module.exports = async (m, Matrix) => {
+  const prefix = process.env.BOT_PREFIX || '.';
+  const cmd = m.body.startsWith(prefix) ? m.body.slice(prefix.length).split(' ')[0].toLowerCase() : '';
+  
+  if (cmd === "ping") {
+    const start = Date.now();
+    await m.reply(\`🏓 Pong! \`);
+    const latency = Date.now() - start;
+    await Matrix.sendMessage(m.from, { text: \`⏱️ Latency: \${latency}ms\` });
+  }
+};`
+        };
+        
+        for (const [filename, content] of Object.entries(defaultPlugins)) {
+            await fs.writeFile(path.join(this.pluginDir, filename), content);
+        }
+        
+        console.log('✅ Created default plugins');
     }
 }
 
